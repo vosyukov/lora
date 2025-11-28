@@ -20,6 +20,7 @@
       }
     },
     "android": {
+      "package": "com.yourcompany.myapp",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
