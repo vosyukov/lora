@@ -32,7 +32,10 @@
         "BLUETOOTH_SCAN",
         "BLUETOOTH_CONNECT",
         "ACCESS_FINE_LOCATION",
-        "ACCESS_COARSE_LOCATION"
+        "ACCESS_COARSE_LOCATION",
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_ADMIN",
+        "android.permission.BLUETOOTH_CONNECT"
       ]
     },
     "web": {
@@ -43,10 +46,18 @@
         "react-native-ble-plx",
         {
           "isBackgroundEnabled": true,
-          "modes": ["peripheral", "central"],
+          "modes": [
+            "peripheral",
+            "central"
+          ],
           "bluetoothAlwaysUsageDescription": "This app uses Bluetooth to scan and connect to nearby BLE devices."
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "43aedf14-4cab-4a02-be50-53dcee098542"
+      }
+    }
   }
 }
