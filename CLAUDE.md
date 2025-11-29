@@ -11,9 +11,10 @@ This is a React Native mobile application built with Expo SDK 54, using TypeScri
 ## Key Dependencies
 
 - **react-native-ble-plx**: Core BLE functionality for scanning and connecting to Bluetooth devices
+- **@meshtastic/protobufs**: Meshtastic Protocol Buffer definitions for encoding/decoding messages (v2.7.8)
 - **expo-status-bar**: Status bar management
+- **expo-dev-client**: Development client for Expo
 - **React 19**: Latest React version with new architecture support
-- **@meshtastic/protobufs** (to be added): Meshtastic Protocol Buffer definitions for encoding/decoding messages
 
 ## Development Commands
 
@@ -34,20 +35,45 @@ Project ID: `43aedf14-4cab-4a02-be50-53dcee098542`
 
 ## Architecture
 
-The application uses a single-file architecture:
+The application uses a simple screen-switching architecture:
 
 - **Entry point**: `index.ts` registers the root component using `registerRootComponent()`
-- **Root component**: `App.tsx` contains the main BLE scanner application
+- **Root component**: `App.tsx` renders the HomeScreen component
+- **Screens**:
+  - `screens/HomeScreen.tsx` - BLE scanner with Meshtastic device detection
+  - `screens/DeviceDetailScreen.tsx` - Meshtastic device connection and communication
+- **Screen Navigation**: Conditional rendering based on state (no navigation library)
 - **TypeScript**: Strict mode enabled, extends Expo's base tsconfig
 
 ### BLE Implementation
 
 The app uses `react-native-ble-plx` for Bluetooth functionality:
 
+**HomeScreen (Scanner)**:
 - **BLE Manager**: Global singleton instance created at module level
 - **Permissions**: Platform-specific handling (Android 31+ requires BLUETOOTH_SCAN, BLUETOOTH_CONNECT, and ACCESS_FINE_LOCATION)
 - **Scanning**: Device scan runs for 10 seconds by default with automatic deduplication based on device ID
 - **State Management**: React state for devices list, scanning status, and Bluetooth adapter state
+- **Meshtastic Detection**: Devices are identified as Meshtastic by:
+  - Service UUID: `6ba1b218-15a8-461f-9fa8-5dcae273eafd`
+  - Device name containing "meshtastic"
+- **UI Features**: Meshtastic devices are visually highlighted with green background, border, and badge
+
+**DeviceDetailScreen (Connection)**:
+- **Connection Flow**: Following Meshtastic BLE protocol:
+  1. Connect to device
+  2. Set MTU to 512 bytes
+  3. Discover services and characteristics
+  4. Subscribe to FromNum (0xed9da18c-a800-4f66-a670-aa7547e34453) for message notifications
+  5. Send ToRadio.want_config_id to request configuration
+  6. Read FromRadio repeatedly to receive initial data
+- **Message Handling**: Processes FromRadio messages including:
+  - MyNodeInfo - local node information
+  - NodeInfo - mesh network nodes
+  - Config/Channel - device configuration
+  - MeshPacket - text messages, position data, telemetry
+- **Protobuf**: Uses @meshtastic/protobufs for encoding ToRadio and decoding FromRadio messages
+- **Real-time Updates**: Monitors FromNum characteristic for new message notifications
 
 ### Platform Configuration
 
