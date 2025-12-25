@@ -4,11 +4,14 @@
   "main": "index.ts",
   "scripts": {
     "start": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
     "web": "expo start --web"
   },
   "dependencies": {
+    "@bufbuild/protobuf": "^2.2.3",
+    "@meshtastic/protobufs": "^2.7.8",
+    "@react-native-async-storage/async-storage": "^2.2.0",
     "expo": "~54.0.25",
     "expo-dev-client": "~6.0.18",
     "expo-status-bar": "~3.0.8",
@@ -16,7 +19,8 @@
     "react-dom": "19.1.0",
     "react-native": "0.81.5",
     "react-native-ble-plx": "^3.5.0",
-    "react-native-web": "^0.21.0"
+    "react-native-web": "^0.21.0",
+    "ste-simple-events": "^3.0.11"
   },
   "devDependencies": {
     "@types/react": "~19.1.0",

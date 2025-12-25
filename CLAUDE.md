@@ -8,6 +8,32 @@ This is a React Native mobile application built with Expo SDK 54, using TypeScri
 
 **Meshtastic Integration**: See [MESHTASTIC_API.md](./MESHTASTIC_API.md) for complete documentation on Meshtastic Bluetooth protocol, protobuf structures, and API usage.
 
+## Product Vision
+
+**Target Audience**: Hunters, fishermen, tourists — regular people (not tech-savvy) who need to communicate with friends in areas without cell coverage.
+
+**Use Case**: A group of friends in the wilderness (forest, mountains, fishing trip) using Meshtastic radios to stay connected, chat, and see each other's locations.
+
+**Core Principle**: The app should "just work" — connect the radio, open the app, see your friends, send messages. No technical knowledge required.
+
+## UI/UX Guidelines
+
+**Design Reference**: Telegram messenger — familiar, intuitive interface that users already know.
+
+**Key Features (by priority)**:
+1. **Chat** — messaging with friends (like Telegram chats)
+2. **Map** — see where friends are located
+3. **Participants** — who's online in the network
+4. **Simple Connection** — easy wizard to find and connect radio
+
+**What to HIDE from users**:
+- Technical details (protobuf, channels, LoRa configs)
+- Complex device settings
+- Debug logs and raw data
+- Meshtastic-specific terminology
+
+**Language**: Russian (primary UI language)
+
 ## Key Dependencies
 
 - **react-native-ble-plx**: Core BLE functionality for scanning and connecting to Bluetooth devices
