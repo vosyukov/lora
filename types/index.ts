@@ -82,3 +82,93 @@ export interface ChatTarget {
   type: 'dm' | 'channel';
   id: number;              // nodeNum for DM, channelIndex for channel
 }
+
+// Device configuration from Meshtastic
+export interface DeviceConfig {
+  // Device Config
+  role?: string;                    // Node role (CLIENT, ROUTER, etc.)
+  serialEnabled?: boolean;
+  buttonGpio?: number;
+  buzzerGpio?: number;
+  rebroadcastMode?: string;
+  nodeInfoBroadcastSecs?: number;
+  doubleTapAsButtonPress?: boolean;
+  tzdef?: string;                   // Timezone
+
+  // Position Config
+  positionBroadcastSecs?: number;
+  positionBroadcastSmartEnabled?: boolean;
+  gpsUpdateInterval?: number;
+  gpsAttemptTime?: number;
+  positionFlags?: number;
+  rxGpio?: number;
+  txGpio?: number;
+  gpsEnGpio?: number;
+  fixedPosition?: boolean;
+
+  // Power Config
+  isPowerSaving?: boolean;
+  onBatteryShutdownAfterSecs?: number;
+  adcMultiplierOverride?: number;
+  waitBluetoothSecs?: number;
+  sdsSecs?: number;                 // Super deep sleep seconds
+  lsSecs?: number;                  // Light sleep seconds
+  minWakeSecs?: number;
+
+  // Network Config
+  wifiEnabled?: boolean;
+  wifiSsid?: string;
+  ethEnabled?: boolean;
+  ntpServer?: string;
+
+  // Display Config
+  screenOnSecs?: number;
+  gpsFormat?: string;
+  autoScreenCarouselSecs?: number;
+  compassNorthTop?: boolean;
+  flipScreen?: boolean;
+  units?: string;                   // METRIC or IMPERIAL
+  oled?: string;                    // OLED type
+
+  // LoRa Config
+  region?: string;                  // Region code (EU_868, US, etc.)
+  modemPreset?: string;             // LONG_FAST, SHORT_SLOW, etc.
+  hopLimit?: number;
+  txPower?: number;                 // Transmit power in dBm
+  txEnabled?: boolean;
+  channelNum?: number;
+  bandwidth?: number;
+  spreadFactor?: number;
+  codingRate?: number;
+  frequencyOffset?: number;
+  overrideDutyCycle?: boolean;
+  ignoreMqtt?: boolean;
+  okToMqtt?: boolean;
+
+  // Bluetooth Config
+  enabled?: boolean;
+  mode?: string;                    // RANDOM_PIN, FIXED_PIN, NO_PIN
+  fixedPin?: number;
+}
+
+// Device metadata from Meshtastic
+export interface DeviceMetadata {
+  firmwareVersion?: string;
+  deviceStateVersion?: number;
+  canShutdown?: boolean;
+  hasWifi?: boolean;
+  hasBluetooth?: boolean;
+  hasEthernet?: boolean;
+  role?: string;
+  positionFlags?: number;
+  hwModel?: string;
+  hasRemoteHardware?: boolean;
+}
+
+// MyNodeInfo - additional info about local node
+export interface MyNodeInfoExtended {
+  myNodeNum: number;
+  rebootCount?: number;
+  minAppVersion?: number;
+  maxChannels?: number;
+}

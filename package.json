@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.2.3",
+    "@maplibre/maplibre-react-native": "^10.4.2",
     "@meshtastic/protobufs": "^2.7.8",
     "@react-native-async-storage/async-storage": "^2.2.0",
     "expo": "~54.0.25",

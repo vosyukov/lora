@@ -1,11 +1,10 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   ScrollView,
   TouchableOpacity,
-  ActivityIndicator,
   Platform,
   Alert,
   TextInput,
@@ -14,26 +13,25 @@ import {
   Share,
   Keyboard,
   Switch,
+  ActivityIndicator,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Device, BleManager } from 'react-native-ble-plx';
 import QRCode from 'react-native-qrcode-svg';
-import * as Location from 'expo-location';
+import MapLibreGL from '@maplibre/maplibre-react-native';
 
 import { meshtasticService } from '../services/MeshtasticService';
-import { notificationService } from '../services/NotificationService';
 import type { NodeInfo, Message, ActiveTab, Channel, ChatTarget } from '../types';
 import { DeviceStatusEnum, ChannelRole } from '../types';
-import {
-  FRIENDS_STORAGE_KEY,
-  MESSAGES_STORAGE_KEY,
-  LAST_READ_STORAGE_KEY,
-  USER_NAME_KEY,
-  MAX_STORED_MESSAGES,
-} from '../constants/meshtastic';
+import { BROADCAST_ADDR, MAP_STYLE_URL } from '../constants/meshtastic';
 
-const GPS_ENABLED_KEY = '@gps_enabled';
-const GPS_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+// Hooks
+import { useGps } from '../hooks/useGps';
+import { useStorage } from '../hooks/useStorage';
+import { useMeshtastic } from '../hooks/useMeshtastic';
+import { useOfflineMap } from '../hooks/useOfflineMap';
+
+// Initialize MapLibre
+MapLibreGL.setAccessToken(null);
 
 interface DeviceDetailScreenProps {
   device: Device;
@@ -46,16 +44,68 @@ export default function DeviceDetailScreen({
   bleManager,
   onBack,
 }: DeviceDetailScreenProps) {
-  const [deviceStatus, setDeviceStatus] = useState<DeviceStatusEnum>(
-    DeviceStatusEnum.DeviceDisconnected
-  );
-  const [myNodeNum, setMyNodeNum] = useState<number | null>(null);
-  const [nodes, setNodes] = useState<NodeInfo[]>([]);
-  const [friendIds, setFriendIds] = useState<Set<number>>(new Set());
-  const [error, setError] = useState<string | null>(null);
+  // Storage hook
+  const {
+    friendIds,
+    addFriend,
+    removeFriend,
+    messages,
+    addMessage,
+    updateMessageStatus,
+    lastReadTimestamps,
+    markChatAsRead,
+    getUnreadCount,
+    userName,
+    setUserName: saveUserName,
+  } = useStorage();
+
+  // Message handler for useMeshtastic
+  const handleIncomingMessage = useCallback((message: Message) => {
+    addMessage(message);
+  }, [addMessage]);
+
+  // ACK handler for useMeshtastic
+  const handleAck = useCallback((packetId: number, success: boolean) => {
+    updateMessageStatus(packetId, success);
+  }, [updateMessageStatus]);
+
+  // Meshtastic hook
+  const {
+    deviceStatus,
+    myNodeNum,
+    error,
+    nodes,
+    channels,
+    deviceTelemetry,
+    deviceConfig,
+    deviceMetadata,
+    myNodeInfo,
+    disconnect,
+    sendMessage,
+    sendChannelMessage,
+    getNodeName,
+    isMyNode,
+  } = useMeshtastic(device, handleIncomingMessage, handleAck);
+
+  // GPS hook
+  const {
+    gpsEnabled,
+    currentLocation,
+    lastGpsSent,
+    toggleGps,
+  } = useGps(deviceStatus === DeviceStatusEnum.DeviceConfigured);
+
+  // Offline map hook
+  const {
+    hasOfflinePack,
+    isDownloading,
+    offlineProgress,
+    downloadOfflineRegion,
+    deleteOfflineRegion,
+  } = useOfflineMap();
+
+  // Local UI state
   const [activeTab, setActiveTab] = useState<ActiveTab>('chat');
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [channels, setChannels] = useState<Channel[]>([]);
   const [openChat, setOpenChat] = useState<ChatTarget | null>(null);
   const [messageText, setMessageText] = useState('');
   const [showCreateGroup, setShowCreateGroup] = useState(false);
@@ -63,30 +113,13 @@ export default function DeviceDetailScreen({
   const [newGroupEncryption, setNewGroupEncryption] = useState<'none' | 'aes128' | 'aes256'>('aes256');
   const [showShareModal, setShowShareModal] = useState(false);
   const [shareChannelUrl, setShareChannelUrl] = useState<string | null>(null);
-  const [lastReadTimestamps, setLastReadTimestamps] = useState<Record<string, number>>({});
   const [showNameModal, setShowNameModal] = useState(false);
-  const [userName, setUserName] = useState<string | null>(null);
   const [nameInput, setNameInput] = useState('');
-  const [deviceTelemetry, setDeviceTelemetry] = useState<{
-    batteryLevel?: number;
-    voltage?: number;
-    channelUtilization?: number;
-    airUtilTx?: number;
-    uptimeSeconds?: number;
-  }>({});
-
-  // GPS state
-  const [gpsEnabled, setGpsEnabled] = useState(false);
-  const [gpsPermissionGranted, setGpsPermissionGranted] = useState(false);
-  const [currentLocation, setCurrentLocation] = useState<{
-    latitude: number;
-    longitude: number;
-    altitude?: number;
-  } | null>(null);
-  const [lastGpsSent, setLastGpsSent] = useState<number | null>(null);
-  const gpsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const scrollViewRef = useRef<ScrollView>(null);
+  const mapRef = useRef<MapLibreGL.MapViewRef>(null);
+  const cameraRef = useRef<MapLibreGL.CameraRef>(null);
+  const [mapCameraSet, setMapCameraSet] = useState(false);
 
   // Filter friends and nearby (excluding self)
   const friends = useMemo(() =>
@@ -108,19 +141,22 @@ export default function DeviceDetailScreen({
   // Messages for current chat
   const chatMessages = useMemo(() => {
     if (!openChat) return [];
+    const BROADCAST_ADDR = 0xFFFFFFFF;
 
     if (openChat.type === 'dm') {
-      // DM: filter by sender/receiver
+      // DM: filter by sender/receiver (non-broadcast messages)
       return messages
         .filter(m =>
-          (m.from === openChat.id && m.to === myNodeNum) ||
-          (m.from === myNodeNum && m.to === openChat.id)
+          m.to !== BROADCAST_ADDR && (
+            (m.from === openChat.id && m.to === myNodeNum) ||
+            (m.from === myNodeNum && m.to === openChat.id)
+          )
         )
         .sort((a, b) => a.timestamp - b.timestamp);
     } else {
-      // Channel: filter by channel index (broadcast messages on this channel)
+      // Channel: filter by channel index AND must be broadcast
       return messages
-        .filter(m => m.channel === openChat.id)
+        .filter(m => m.channel === openChat.id && m.to === BROADCAST_ADDR)
         .sort((a, b) => a.timestamp - b.timestamp);
     }
   }, [messages, openChat, myNodeNum]);
@@ -180,410 +216,13 @@ export default function DeviceDetailScreen({
     );
   }, [messages, myNodeNum]);
 
-  // Load data from storage and initialize notifications
-  useEffect(() => {
-    loadFriends();
-    loadMessages();
-    loadLastRead();
-    loadUserName();
-    loadGpsSettings();
-    notificationService.initialize();
-
-    return () => {
-      notificationService.cleanup();
-      // Clean up GPS interval
-      if (gpsIntervalRef.current) {
-        clearInterval(gpsIntervalRef.current);
-      }
-    };
-  }, []);
 
   // Show name modal when device is configured and no name is set
   useEffect(() => {
     if (deviceStatus === DeviceStatusEnum.DeviceConfigured && userName === null) {
-      // Check if we need to ask for name (first time setup)
-      AsyncStorage.getItem(USER_NAME_KEY).then(savedName => {
-        if (!savedName) {
-          setShowNameModal(true);
-        }
-      });
+      setShowNameModal(true);
     }
   }, [deviceStatus, userName]);
-
-  // Auto-start GPS when device is configured and GPS was enabled
-  useEffect(() => {
-    if (deviceStatus === DeviceStatusEnum.DeviceConfigured) {
-      AsyncStorage.getItem(GPS_ENABLED_KEY).then(stored => {
-        if (stored === 'true') {
-          startGpsTracking();
-        }
-      });
-    }
-  }, [deviceStatus]);
-
-  // Connect to device and subscribe to events
-  useEffect(() => {
-    // Subscribe to typed events from MeshtasticService
-    const unsubStatus = meshtasticService.onDeviceStatus.subscribe(setDeviceStatus);
-
-    const unsubMyInfo = meshtasticService.onMyNodeInfo.subscribe((info) => {
-      setMyNodeNum(info.myNodeNum);
-    });
-
-    const unsubNodeInfo = meshtasticService.onNodeInfoPacket.subscribe((node) => {
-      setNodes(prev => {
-        const existing = prev.findIndex(n => n.nodeNum === node.nodeNum);
-        if (existing !== -1) {
-          const updated = [...prev];
-          updated[existing] = node;
-          return updated;
-        }
-        return [...prev, node];
-      });
-    });
-
-    const unsubChannel = meshtasticService.onChannelPacket.subscribe((channel) => {
-      setChannels(prev => {
-        const existing = prev.findIndex(ch => ch.index === channel.index);
-        if (existing !== -1) {
-          const updated = [...prev];
-          updated[existing] = channel;
-          return updated;
-        }
-        return [...prev, channel];
-      });
-    });
-
-    const unsubMessage = meshtasticService.onMessagePacket.subscribe((msg) => {
-      setMessages(prev => {
-        // Check for duplicates
-        if (prev.some(m => m.id === msg.id)) {
-          return prev;
-        }
-
-        const updated = [...prev, msg];
-        saveMessages(updated);
-
-        // Show notification if chat is not open
-        const senderNode = meshtasticService.getNode(msg.from);
-        const senderName = senderNode?.longName || senderNode?.shortName || 'Someone';
-        const BROADCAST_ADDR = 0xFFFFFFFF;
-        const isChannelMessage = msg.to === BROADCAST_ADDR;
-
-        // Check if this chat is already open
-        const isChatOpen = openChat && (
-          (openChat.type === 'dm' && openChat.id === msg.from) ||
-          (openChat.type === 'channel' && openChat.id === msg.channel)
-        );
-
-        if (!isChatOpen && !msg.isOutgoing) {
-          if (isChannelMessage) {
-            const channel = meshtasticService.getChannel(msg.channel ?? 0);
-            const channelName = channel?.name || `Канал ${msg.channel ?? 0}`;
-            // Show push notification when app is in background
-            notificationService.showMessageNotification(senderName, msg.text, true, channelName);
-            // Show in-app alert
-            Alert.alert(
-              `#${channelName}`,
-              `${senderName}: ${msg.text.length > 40 ? msg.text.substring(0, 40) + '...' : msg.text}`,
-              [
-                { text: 'Закрыть', style: 'cancel' },
-                { text: 'Открыть', onPress: () => openChatHandler({ type: 'channel', id: msg.channel ?? 0 }) },
-              ]
-            );
-          } else {
-            // Show push notification when app is in background
-            notificationService.showMessageNotification(senderName, msg.text, false);
-            // Show in-app alert
-            Alert.alert(
-              senderName,
-              msg.text.length > 50 ? msg.text.substring(0, 50) + '...' : msg.text,
-              [
-                { text: 'Закрыть', style: 'cancel' },
-                { text: 'Открыть', onPress: () => openChatHandler({ type: 'dm', id: msg.from }) },
-              ]
-            );
-          }
-        }
-
-        return updated;
-      });
-    });
-
-    // Subscribe to message ACK events for delivery status
-    const unsubAck = meshtasticService.onMessageAck.subscribe(({ packetId, success }) => {
-      setMessages(prev => {
-        const msgIndex = prev.findIndex(m => m.packetId === packetId);
-        if (msgIndex === -1) return prev;
-
-        const updated = [...prev];
-        updated[msgIndex] = {
-          ...updated[msgIndex],
-          status: success ? 'delivered' : 'failed',
-        };
-        saveMessages(updated);
-        return updated;
-      });
-    });
-
-    const unsubError = meshtasticService.onError.subscribe((err) => {
-      setError(err.message);
-    });
-
-    // Subscribe to telemetry for device stats
-    const unsubTelemetry = meshtasticService.onTelemetryPacket.subscribe((packet) => {
-      // Only process telemetry from our own node
-      if (packet.from !== meshtasticService.myNodeNum) return;
-
-      const telemetry = packet.data;
-      const variant = (telemetry as { variant?: { case: string; value: unknown } }).variant;
-
-      if (variant?.case === 'deviceMetrics') {
-        const metrics = variant.value as {
-          batteryLevel?: number;
-          voltage?: number;
-          channelUtilization?: number;
-          airUtilTx?: number;
-          uptimeSeconds?: number;
-        };
-        setDeviceTelemetry(prev => ({
-          ...prev,
-          batteryLevel: metrics.batteryLevel,
-          voltage: metrics.voltage,
-          channelUtilization: metrics.channelUtilization,
-          airUtilTx: metrics.airUtilTx,
-          uptimeSeconds: metrics.uptimeSeconds,
-        }));
-      }
-    });
-
-    // Set BLE manager for reconnection support
-    meshtasticService.setBleManager(bleManager);
-    meshtasticService.connect(device).catch(() => {
-      // Error is handled via event
-    });
-
-    return () => {
-      unsubStatus();
-      unsubMyInfo();
-      unsubNodeInfo();
-      unsubChannel();
-      unsubMessage();
-      unsubAck();
-      unsubTelemetry();
-      unsubError();
-      meshtasticService.disconnect();
-    };
-  }, []);
-
-  const loadFriends = async () => {
-    try {
-      const stored = await AsyncStorage.getItem(FRIENDS_STORAGE_KEY);
-      if (stored) {
-        const ids = JSON.parse(stored) as number[];
-        setFriendIds(new Set(ids));
-      }
-    } catch {
-      // Ignore load errors
-    }
-  };
-
-  const saveFriends = async (ids: Set<number>) => {
-    try {
-      await AsyncStorage.setItem(FRIENDS_STORAGE_KEY, JSON.stringify([...ids]));
-    } catch {
-      // Ignore save errors
-    }
-  };
-
-  const loadMessages = async () => {
-    try {
-      const stored = await AsyncStorage.getItem(MESSAGES_STORAGE_KEY);
-      if (stored) {
-        const msgs = JSON.parse(stored) as Message[];
-        setMessages(msgs);
-      }
-    } catch {
-      // Ignore load errors
-    }
-  };
-
-  const saveMessages = async (msgs: Message[]) => {
-    try {
-      const toSave = msgs.slice(-MAX_STORED_MESSAGES);
-      await AsyncStorage.setItem(MESSAGES_STORAGE_KEY, JSON.stringify(toSave));
-    } catch {
-      // Ignore save errors
-    }
-  };
-
-  const loadLastRead = async () => {
-    try {
-      const stored = await AsyncStorage.getItem(LAST_READ_STORAGE_KEY);
-      if (stored) {
-        setLastReadTimestamps(JSON.parse(stored));
-      }
-    } catch {
-      // Ignore load errors
-    }
-  };
-
-  const saveLastRead = async (timestamps: Record<string, number>) => {
-    try {
-      await AsyncStorage.setItem(LAST_READ_STORAGE_KEY, JSON.stringify(timestamps));
-    } catch {
-      // Ignore save errors
-    }
-  };
-
-  const loadUserName = async () => {
-    try {
-      const stored = await AsyncStorage.getItem(USER_NAME_KEY);
-      if (stored) {
-        setUserName(stored);
-      }
-    } catch {
-      // Ignore load errors
-    }
-  };
-
-  const saveUserName = async (name: string) => {
-    try {
-      await AsyncStorage.setItem(USER_NAME_KEY, name);
-      setUserName(name);
-    } catch {
-      // Ignore save errors
-    }
-  };
-
-  // GPS functions
-  const loadGpsSettings = async () => {
-    try {
-      const stored = await AsyncStorage.getItem(GPS_ENABLED_KEY);
-      if (stored === 'true') {
-        // Will be enabled after permission check
-        checkGpsPermission();
-      }
-    } catch {
-      // Ignore load errors
-    }
-  };
-
-  const saveGpsEnabled = async (enabled: boolean) => {
-    try {
-      await AsyncStorage.setItem(GPS_ENABLED_KEY, enabled ? 'true' : 'false');
-    } catch {
-      // Ignore save errors
-    }
-  };
-
-  const checkGpsPermission = async () => {
-    const { status } = await Location.getForegroundPermissionsAsync();
-    setGpsPermissionGranted(status === 'granted');
-    return status === 'granted';
-  };
-
-  const requestGpsPermission = async (): Promise<boolean> => {
-    console.log('requestGpsPermission: calling Location.requestForegroundPermissionsAsync()');
-    try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      console.log('requestGpsPermission: status =', status);
-      const granted = status === 'granted';
-      setGpsPermissionGranted(granted);
-      return granted;
-    } catch (err) {
-      console.error('requestGpsPermission error:', err);
-      return false;
-    }
-  };
-
-  const sendCurrentPosition = async () => {
-    console.log('sendCurrentPosition called, isConnected:', meshtasticService.isConnected());
-    if (!meshtasticService.isConnected()) return;
-
-    try {
-      console.log('Getting current position...');
-      const location = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.Balanced,
-      });
-
-      console.log('Got position:', location.coords.latitude, location.coords.longitude);
-
-      setCurrentLocation({
-        latitude: location.coords.latitude,
-        longitude: location.coords.longitude,
-        altitude: location.coords.altitude ?? undefined,
-      });
-
-      const success = await meshtasticService.sendPosition(
-        location.coords.latitude,
-        location.coords.longitude,
-        location.coords.altitude ?? undefined
-      );
-
-      console.log('sendPosition result:', success);
-
-      if (success) {
-        setLastGpsSent(Date.now());
-      }
-    } catch (err) {
-      console.warn('Failed to send position:', err);
-    }
-  };
-
-  const startGpsTracking = async () => {
-    console.log('startGpsTracking called, gpsPermissionGranted:', gpsPermissionGranted);
-
-    // Check/request permission
-    let hasPermission = gpsPermissionGranted;
-    if (!hasPermission) {
-      console.log('Requesting GPS permission...');
-      hasPermission = await requestGpsPermission();
-      console.log('Permission result:', hasPermission);
-    }
-
-    if (!hasPermission) {
-      console.log('Permission denied, showing alert');
-      Alert.alert(
-        'Доступ к GPS',
-        'Для передачи позиции друзьям нужен доступ к геолокации.',
-        [{ text: 'OK' }]
-      );
-      return;
-    }
-
-    console.log('GPS permission granted, enabling tracking');
-    setGpsEnabled(true);
-    saveGpsEnabled(true);
-
-    // Send position immediately
-    sendCurrentPosition();
-
-    // Start periodic updates
-    if (gpsIntervalRef.current) {
-      clearInterval(gpsIntervalRef.current);
-    }
-    gpsIntervalRef.current = setInterval(sendCurrentPosition, GPS_INTERVAL_MS);
-  };
-
-  const stopGpsTracking = () => {
-    setGpsEnabled(false);
-    saveGpsEnabled(false);
-
-    if (gpsIntervalRef.current) {
-      clearInterval(gpsIntervalRef.current);
-      gpsIntervalRef.current = null;
-    }
-  };
-
-  const toggleGps = () => {
-    console.log('toggleGps called, gpsEnabled:', gpsEnabled);
-    if (gpsEnabled) {
-      stopGpsTracking();
-    } else {
-      startGpsTracking();
-    }
-  };
 
   const handleSetUserName = async () => {
     const name = nameInput.trim();
@@ -601,82 +240,39 @@ export default function DeviceDetailScreen({
     }
   };
 
+  // Helper to get chat key for unread tracking
   const getChatKey = (target: ChatTarget): string => {
     return target.type === 'dm' ? `dm_${target.id}` : `channel_${target.id}`;
   };
 
-  const markChatAsRead = (target: ChatTarget) => {
+  // Get unread count for a chat target
+  const getUnreadCountForChat = (target: ChatTarget): number => {
     const key = getChatKey(target);
-    const newTimestamps = { ...lastReadTimestamps, [key]: Date.now() };
-    setLastReadTimestamps(newTimestamps);
-    saveLastRead(newTimestamps);
-  };
-
-  const getUnreadCount = (target: ChatTarget): number => {
-    const key = getChatKey(target);
-    const lastRead = lastReadTimestamps[key] || 0;
-
-    if (target.type === 'dm') {
-      return messages.filter(m =>
-        m.from === target.id &&
-        m.to === myNodeNum &&
-        !m.isOutgoing &&
-        m.timestamp > lastRead
-      ).length;
-    } else {
-      return messages.filter(m =>
-        m.channel === target.id &&
-        !m.isOutgoing &&
-        m.timestamp > lastRead
-      ).length;
-    }
-  };
-
-  const sendMessage = async (toNodeNum: number, text: string) => {
-    const sentMessage = await meshtasticService.sendMessage(toNodeNum, text);
-
-    if (sentMessage) {
-      setMessages(prev => {
-        const updated = [...prev, sentMessage];
-        saveMessages(updated);
-        return updated;
-      });
-      setMessageText('');
-
-      setTimeout(() => {
-        scrollViewRef.current?.scrollToEnd({ animated: true });
-      }, 100);
-    } else {
-      Alert.alert('Error', 'Failed to send message');
-    }
+    const targetMessages = target.type === 'dm'
+      ? messages.filter(m => m.from === target.id && m.to === myNodeNum && !m.isOutgoing)
+      : messages.filter(m => m.channel === target.id && !m.isOutgoing);
+    return getUnreadCount(key, targetMessages);
   };
 
   const handleSendMessage = async () => {
     if (!openChat || !messageText.trim()) return;
 
-    let sentMessage;
+    let sentMessage: Message | null;
 
     if (openChat.type === 'dm') {
-      // Direct message
-      sentMessage = await meshtasticService.sendMessage(openChat.id, messageText);
+      sentMessage = await sendMessage(openChat.id, messageText);
     } else {
-      // Channel message (broadcast on channel)
-      sentMessage = await meshtasticService.sendText(messageText, 'broadcast', openChat.id);
+      sentMessage = await sendChannelMessage(messageText, openChat.id);
     }
 
     if (sentMessage) {
-      setMessages(prev => {
-        const updated = [...prev, sentMessage!];
-        saveMessages(updated);
-        return updated;
-      });
+      addMessage(sentMessage);
       setMessageText('');
-
       setTimeout(() => {
         scrollViewRef.current?.scrollToEnd({ animated: true });
       }, 100);
     } else {
-      Alert.alert('Error', 'Failed to send message');
+      Alert.alert('Ошибка', 'Не удалось отправить сообщение');
     }
   };
 
@@ -778,22 +374,9 @@ export default function DeviceDetailScreen({
     onBack();
   };
 
-  const addFriend = (nodeNum: number) => {
-    const newIds = new Set([...friendIds, nodeNum]);
-    setFriendIds(newIds);
-    saveFriends(newIds);
-  };
-
-  const removeFriend = (nodeNum: number) => {
-    const newIds = new Set(friendIds);
-    newIds.delete(nodeNum);
-    setFriendIds(newIds);
-    saveFriends(newIds);
-  };
-
   const openChatHandler = (target: ChatTarget) => {
     setOpenChat(target);
-    markChatAsRead(target);
+    markChatAsRead(getChatKey(target));
   };
 
   const handleNodePress = (node: NodeInfo) => {
@@ -824,18 +407,14 @@ export default function DeviceDetailScreen({
     return '📻';
   };
 
-  const getNodeName = (node: NodeInfo | undefined): string => {
+  const getNodeNameSafe = (node: NodeInfo | undefined): string => {
     if (!node) return 'Unknown';
-    return node.longName || node.shortName || `Node ${node.nodeNum.toString(16)}`;
+    return getNodeName(node);
   };
 
   const getNodeByNum = (nodeNum: number): NodeInfo | undefined => {
     return nodes.find(n => n.nodeNum === nodeNum);
   };
-
-  function isMyNode(node: NodeInfo): boolean {
-    return myNodeNum !== null && node.nodeNum === myNodeNum;
-  }
 
   const formatTime = (timestamp: number): string => {
     const date = new Date(timestamp);
@@ -850,7 +429,7 @@ export default function DeviceDetailScreen({
       : null;
 
     const canDelete = channel.role !== ChannelRole.PRIMARY;
-    const unreadCount = getUnreadCount({ type: 'channel', id: channel.index });
+    const unreadCount = getUnreadCountForChat({ type: 'channel', id: channel.index });
 
     return (
       <TouchableOpacity
@@ -933,7 +512,7 @@ export default function DeviceDetailScreen({
 
         {chatList.map(chat => {
           const node = getNodeByNum(chat.nodeNum);
-          const unreadCount = getUnreadCount({ type: 'dm', id: chat.nodeNum });
+          const unreadCount = getUnreadCountForChat({ type: 'dm', id: chat.nodeNum });
           return (
             <TouchableOpacity
               key={chat.nodeNum}
@@ -947,7 +526,7 @@ export default function DeviceDetailScreen({
               <View style={styles.chatListInfo}>
                 <View style={styles.chatListHeader}>
                   <Text style={[styles.chatListName, unreadCount > 0 && styles.chatListNameUnread]}>
-                    {getNodeName(node)}
+                    {getNodeNameSafe(node)}
                   </Text>
                   <Text style={styles.chatListTime}>
                     {formatTime(chat.lastMessage.timestamp)}
@@ -1053,7 +632,7 @@ export default function DeviceDetailScreen({
     // Get chat header info
     const headerName = isChannel
       ? `#${channel?.name || `Channel ${openChat.id}`}`
-      : getNodeName(chatPartner);
+      : getNodeNameSafe(chatPartner);
     const headerStatus = isChannel
       ? (channel?.hasEncryption ? 'Encrypted' : 'Open')
       : 'Online';
@@ -1116,7 +695,7 @@ export default function DeviceDetailScreen({
           ) : (
             chatMessages.map(msg => {
               const senderNode = getNodeByNum(msg.from);
-              const senderName = getNodeName(senderNode);
+              const senderName = getNodeNameSafe(senderNode);
 
               // Status indicator for outgoing messages
               const getStatusIcon = () => {
@@ -1314,8 +893,16 @@ export default function DeviceDetailScreen({
           </View>
         </View>
 
-        {/* GPS */}
-        <Text style={styles.sectionHeader}>GPS</Text>
+        <View style={styles.bottomPadding} />
+      </ScrollView>
+    );
+  };
+
+  const renderSettingsTab = () => {
+    return (
+      <ScrollView style={styles.nodesList} showsVerticalScrollIndicator={false}>
+        {/* GPS Settings */}
+        <Text style={styles.sectionHeader}>ГЕОЛОКАЦИЯ</Text>
         <View style={styles.nodeStatusCard}>
           <View style={styles.nodeStatusRow}>
             <View style={styles.gpsLabelContainer}>
@@ -1357,7 +944,7 @@ export default function DeviceDetailScreen({
           )}
         </View>
 
-        {/* User Info */}
+        {/* Profile */}
         {userName && (
           <>
             <Text style={styles.sectionHeader}>ПРОФИЛЬ</Text>
@@ -1376,8 +963,281 @@ export default function DeviceDetailScreen({
           </>
         )}
 
+        {/* About */}
+        <Text style={styles.sectionHeader}>О ПРИЛОЖЕНИИ</Text>
+        <View style={styles.nodeStatusCard}>
+          <View style={styles.nodeStatusRow}>
+            <Text style={styles.nodeStatusLabel}>Версия</Text>
+            <Text style={styles.nodeStatusValue}>1.0.0</Text>
+          </View>
+        </View>
+
         <View style={styles.bottomPadding} />
       </ScrollView>
+    );
+  };
+
+  // Get nodes with valid positions
+  const nodesWithPosition = useMemo(() => {
+    return nodes.filter(node => {
+      if (!node.position) return false;
+      const pos = node.position as { latitudeI?: number; longitudeI?: number };
+      return pos.latitudeI && pos.longitudeI && pos.latitudeI !== 0 && pos.longitudeI !== 0;
+    });
+  }, [nodes]);
+
+  // Calculate map region to show all markers
+  const getMapRegion = () => {
+    const positions: { lat: number; lon: number }[] = [];
+
+    // Add nodes with positions
+    nodesWithPosition.forEach(node => {
+      const pos = node.position as { latitudeI: number; longitudeI: number };
+      positions.push({
+        lat: pos.latitudeI / 1e7,
+        lon: pos.longitudeI / 1e7,
+      });
+    });
+
+    // Add current location if available
+    if (currentLocation) {
+      positions.push({
+        lat: currentLocation.latitude,
+        lon: currentLocation.longitude,
+      });
+    }
+
+    if (positions.length === 0) {
+      // Default to some location if no positions
+      return {
+        latitude: 55.7558,
+        longitude: 37.6173,
+        latitudeDelta: 0.5,
+        longitudeDelta: 0.5,
+      };
+    }
+
+    if (positions.length === 1) {
+      return {
+        latitude: positions[0].lat,
+        longitude: positions[0].lon,
+        latitudeDelta: 0.01,
+        longitudeDelta: 0.01,
+      };
+    }
+
+    // Calculate bounds
+    const lats = positions.map(p => p.lat);
+    const lons = positions.map(p => p.lon);
+    const minLat = Math.min(...lats);
+    const maxLat = Math.max(...lats);
+    const minLon = Math.min(...lons);
+    const maxLon = Math.max(...lons);
+
+    const latDelta = Math.max((maxLat - minLat) * 1.5, 0.01);
+    const lonDelta = Math.max((maxLon - minLon) * 1.5, 0.01);
+
+    return {
+      latitude: (minLat + maxLat) / 2,
+      longitude: (minLon + maxLon) / 2,
+      latitudeDelta: latDelta,
+      longitudeDelta: lonDelta,
+    };
+  };
+
+  const handleDownloadOffline = () => {
+    const region = getMapRegion();
+    downloadOfflineRegion(region);
+  };
+
+  const handleCenterOnMe = () => {
+    if (currentLocation && cameraRef.current) {
+      cameraRef.current.setCamera({
+        centerCoordinate: [currentLocation.longitude, currentLocation.latitude],
+        zoomLevel: 14,
+        animationDuration: 500,
+        animationMode: 'flyTo',
+      });
+    }
+  };
+
+  const handleShowAllFriends = () => {
+    if (!cameraRef.current) return;
+
+    const positions: [number, number][] = [];
+
+    // Add current location
+    if (currentLocation) {
+      positions.push([currentLocation.longitude, currentLocation.latitude]);
+    }
+
+    // Add friends with positions
+    nodesWithPosition.forEach(node => {
+      if (friendIds.has(node.nodeNum) && node.nodeNum !== myNodeNum) {
+        const pos = node.position as { latitudeI: number; longitudeI: number };
+        positions.push([pos.longitudeI / 1e7, pos.latitudeI / 1e7]);
+      }
+    });
+
+    if (positions.length === 0) return;
+
+    if (positions.length === 1) {
+      cameraRef.current.setCamera({
+        centerCoordinate: positions[0],
+        zoomLevel: 14,
+        animationDuration: 500,
+        animationMode: 'flyTo',
+      });
+      return;
+    }
+
+    // Calculate bounds
+    const lngs = positions.map(p => p[0]);
+    const lats = positions.map(p => p[1]);
+    const sw: [number, number] = [Math.min(...lngs), Math.min(...lats)];
+    const ne: [number, number] = [Math.max(...lngs), Math.max(...lats)];
+
+    cameraRef.current.fitBounds(ne, sw, 50, 500);
+  };
+
+  const renderMapTab = () => {
+    const hasAnyPosition = nodesWithPosition.length > 0 || currentLocation;
+
+    if (!hasAnyPosition) {
+      return (
+        <View style={styles.emptyState}>
+          <Text style={styles.emptyIcon}>🗺️</Text>
+          <Text style={styles.emptyTitle}>Нет данных о позициях</Text>
+          <Text style={styles.emptyText}>
+            Включите GPS или дождитесь, когда друзья передадут свои координаты
+          </Text>
+        </View>
+      );
+    }
+
+    // Calculate center
+    const region = getMapRegion();
+
+    const friendsCount = nodesWithPosition.filter(n => friendIds.has(n.nodeNum) && n.nodeNum !== myNodeNum).length;
+    const othersCount = nodesWithPosition.filter(n => !friendIds.has(n.nodeNum) && n.nodeNum !== myNodeNum).length;
+
+    return (
+      <View style={styles.mapContainer}>
+        <MapLibreGL.MapView
+          ref={mapRef}
+          style={styles.map}
+          mapStyle={MAP_STYLE_URL}
+          logoEnabled={false}
+          attributionEnabled={false}
+          onDidFinishLoadingMap={() => setMapCameraSet(true)}
+        >
+          <MapLibreGL.Camera
+            ref={cameraRef}
+            centerCoordinate={!mapCameraSet ? [region.longitude, region.latitude] : undefined}
+            zoomLevel={!mapCameraSet ? 12 : undefined}
+            animationMode="moveTo"
+            animationDuration={0}
+          />
+
+          {/* Current user location */}
+          {currentLocation && (
+            <MapLibreGL.PointAnnotation
+              id="user-location"
+              coordinate={[currentLocation.longitude, currentLocation.latitude]}
+              title="Вы"
+            >
+              <View style={styles.markerMe}>
+                <View style={styles.markerMeInner} />
+              </View>
+            </MapLibreGL.PointAnnotation>
+          )}
+
+          {/* Friends and other nodes */}
+          {nodesWithPosition.map(node => {
+            const isMe = node.nodeNum === myNodeNum;
+            if (isMe && currentLocation) return null;
+
+            const pos = node.position as { latitudeI: number; longitudeI: number };
+            const isFriend = friendIds.has(node.nodeNum);
+
+            return (
+              <MapLibreGL.PointAnnotation
+                key={`node-${node.nodeNum}`}
+                id={`node-${node.nodeNum}`}
+                coordinate={[pos.longitudeI / 1e7, pos.latitudeI / 1e7]}
+                title={getNodeName(node)}
+              >
+                <View style={[
+                  styles.marker,
+                  { backgroundColor: isMe ? '#2AABEE' : (isFriend ? '#31B545' : '#8E8E93') }
+                ]} />
+              </MapLibreGL.PointAnnotation>
+            );
+          })}
+        </MapLibreGL.MapView>
+
+        {/* Map controls */}
+        <View style={styles.mapControls}>
+          {/* Center on me button */}
+          {currentLocation && (
+            <TouchableOpacity
+              style={styles.centerButton}
+              onPress={handleCenterOnMe}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.centerButtonIcon}>◎</Text>
+            </TouchableOpacity>
+          )}
+
+          {/* Show all friends button */}
+          {friendsCount > 0 && (
+            <TouchableOpacity
+              style={styles.centerButton}
+              onPress={handleShowAllFriends}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.friendsButtonIcon}>👥</Text>
+            </TouchableOpacity>
+          )}
+
+          {/* Offline download button */}
+          {isDownloading ? (
+            <View style={styles.downloadProgress}>
+              <ActivityIndicator size="small" color="#2AABEE" />
+              <Text style={styles.downloadProgressText}>
+                {offlineProgress !== null ? `${Math.round(offlineProgress)}%` : 'Загрузка...'}
+              </Text>
+            </View>
+          ) : (
+            <TouchableOpacity
+              style={styles.offlineButton}
+              onPress={hasOfflinePack ? deleteOfflineRegion : handleDownloadOffline}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.offlineButtonIcon}>{hasOfflinePack ? '✓' : '↓'}</Text>
+              <Text style={styles.offlineButtonText}>
+                {hasOfflinePack ? 'Офлайн' : 'Скачать'}
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
+        {/* Legend */}
+        <View style={styles.mapLegend}>
+          <View style={styles.legendItem}>
+            <View style={[styles.legendDot, { backgroundColor: '#2AABEE' }]} />
+            <Text style={styles.legendText}>Вы</Text>
+          </View>
+          <View style={styles.legendItem}>
+            <View style={[styles.legendDot, { backgroundColor: '#31B545' }]} />
+            <Text style={styles.legendText}>Друзья ({friendsCount})</Text>
+          </View>
+          <View style={styles.legendItem}>
+            <View style={[styles.legendDot, { backgroundColor: '#8E8E93' }]} />
+            <Text style={styles.legendText}>Другие ({othersCount})</Text>
+          </View>
+        </View>
+      </View>
     );
   };
 
@@ -1449,21 +1309,9 @@ export default function DeviceDetailScreen({
       )}
 
       {activeTab === 'chat' && renderChatTab()}
-      {activeTab === 'map' && (
-        <View style={styles.emptyState}>
-          <Text style={styles.emptyIcon}>🗺️</Text>
-          <Text style={styles.emptyTitle}>Карта</Text>
-          <Text style={styles.emptyText}>Карта с друзьями скоро будет</Text>
-        </View>
-      )}
+      {activeTab === 'map' && renderMapTab()}
       {activeTab === 'node' && renderNodeTab()}
-      {activeTab === 'settings' && (
-        <View style={styles.emptyState}>
-          <Text style={styles.emptyIcon}>⚙️</Text>
-          <Text style={styles.emptyTitle}>Настройки</Text>
-          <Text style={styles.emptyText}>Настройки скоро будут</Text>
-        </View>
-      )}
+      {activeTab === 'settings' && renderSettingsTab()}
 
       {!openChat && (
         <View style={styles.tabBar}>
@@ -2360,5 +2208,139 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#8E8E93',
     marginTop: 2,
+  },
+  // Map Styles
+  mapContainer: {
+    flex: 1,
+  },
+  map: {
+    flex: 1,
+  },
+  mapLegend: {
+    position: 'absolute',
+    bottom: 16,
+    left: 16,
+    right: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderRadius: 12,
+    padding: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  legendDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    marginRight: 6,
+  },
+  legendText: {
+    fontSize: 12,
+    color: '#000000',
+  },
+  // MapLibre marker styles
+  marker: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 3,
+    borderColor: '#FFFFFF',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 2,
+    elevation: 3,
+  },
+  markerMe: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(42, 171, 238, 0.3)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  markerMeInner: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: '#2AABEE',
+    borderWidth: 3,
+    borderColor: '#FFFFFF',
+  },
+  // Offline controls
+  mapControls: {
+    position: 'absolute',
+    top: 16,
+    right: 16,
+  },
+  offlineButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  centerButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  centerButtonIcon: {
+    fontSize: 22,
+    color: '#2AABEE',
+  },
+  friendsButtonIcon: {
+    fontSize: 18,
+  },
+  offlineButtonIcon: {
+    fontSize: 14,
+    marginRight: 4,
+  },
+  offlineButtonText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#000000',
+  },
+  downloadProgress: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  downloadProgressText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#2AABEE',
+    marginLeft: 8,
   },
 });

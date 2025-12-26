@@ -24,4 +24,25 @@ export const MESSAGES_STORAGE_KEY = '@messages';
 export const LAST_DEVICE_KEY = '@last_device';
 export const LAST_READ_STORAGE_KEY = '@last_read';
 export const USER_NAME_KEY = '@user_name';
+export const GPS_ENABLED_KEY = '@gps_enabled';
 export const MAX_STORED_MESSAGES = 500;
+
+// GPS configuration
+export const GPS_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
+// Map configuration
+export const MAP_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
+export const OFFLINE_PACK_NAME = 'meshNetwork';
+
+// UI Colors
+export const COLORS = {
+  primary: '#2AABEE',
+  success: '#31B545',
+  warning: '#FF9500',
+  error: '#FF3B30',
+  textPrimary: '#000000',
+  textSecondary: '#8E8E93',
+  background: '#F8F8F8',
+  border: '#E5E5EA',
+  white: '#FFFFFF',
+} as const;

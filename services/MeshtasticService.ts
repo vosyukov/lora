@@ -3,7 +3,7 @@ import { SimpleEventDispatcher } from 'ste-simple-events';
 import type * as Protobuf from '@meshtastic/protobufs';
 
 import { DeviceStatusEnum, ChannelRole } from '../types';
-import type { NodeInfo, Message, PacketMetadata, Channel } from '../types';
+import type { NodeInfo, Message, PacketMetadata, Channel, DeviceConfig, DeviceMetadata, MyNodeInfoExtended } from '../types';
 import {
   MESHTASTIC_SERVICE_UUID,
   TORADIO_UUID,
@@ -35,6 +35,9 @@ class MeshtasticService {
   private isReconnecting: boolean = false;
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private bleManager: import('react-native-ble-plx').BleManager | null = null;
+  private _deviceConfig: DeviceConfig = {};
+  private _deviceMetadata: DeviceMetadata = {};
+  private _myNodeInfo: MyNodeInfoExtended | null = null;
 
   // Typed event dispatchers (similar to @meshtastic/core EventSystem)
   readonly onDeviceStatus = new SimpleEventDispatcher<DeviceStatusEnum>();
@@ -45,6 +48,9 @@ class MeshtasticService {
   readonly onPositionPacket = new SimpleEventDispatcher<PacketMetadata<Protobuf.Mesh.Position>>();
   readonly onTelemetryPacket = new SimpleEventDispatcher<PacketMetadata<Protobuf.Telemetry.Telemetry>>();
   readonly onChannelPacket = new SimpleEventDispatcher<Channel>();
+  readonly onConfigPacket = new SimpleEventDispatcher<DeviceConfig>();
+  readonly onMetadataPacket = new SimpleEventDispatcher<DeviceMetadata>();
+  readonly onMyNodeInfoExtended = new SimpleEventDispatcher<MyNodeInfoExtended>();
   readonly onError = new SimpleEventDispatcher<Error>();
 
   get myNodeNum(): number | null {
@@ -73,6 +79,18 @@ class MeshtasticService {
 
   getActiveChannels(): Channel[] {
     return this.getChannels().filter(ch => ch.role !== ChannelRole.DISABLED);
+  }
+
+  getDeviceConfig(): DeviceConfig {
+    return { ...this._deviceConfig };
+  }
+
+  getDeviceMetadata(): DeviceMetadata {
+    return { ...this._deviceMetadata };
+  }
+
+  getMyNodeInfoExtended(): MyNodeInfoExtended | null {
+    return this._myNodeInfo ? { ...this._myNodeInfo } : null;
   }
 
   isConnected(): boolean {
@@ -329,6 +347,9 @@ class MeshtasticService {
     this._myNodeNum = null;
     this.nodes.clear();
     this.channels.clear();
+    this._deviceConfig = {};
+    this._deviceMetadata = {};
+    this._myNodeInfo = null;
     this.updateDeviceStatus(DeviceStatusEnum.DeviceDisconnected);
   }
 
@@ -837,9 +858,20 @@ class MeshtasticService {
 
     switch (variant.case) {
       case 'myInfo': {
-        const myInfo = variant.value as Protobuf.Mesh.MyNodeInfo;
+        const myInfo = variant.value as Protobuf.Mesh.MyNodeInfo & {
+          rebootCount?: number;
+          minAppVersion?: number;
+          maxChannels?: number;
+        };
         this._myNodeNum = myInfo.myNodeNum;
+        this._myNodeInfo = {
+          myNodeNum: myInfo.myNodeNum,
+          rebootCount: myInfo.rebootCount,
+          minAppVersion: myInfo.minAppVersion,
+          maxChannels: myInfo.maxChannels,
+        };
         this.onMyNodeInfo.dispatch(myInfo);
+        this.onMyNodeInfoExtended.dispatch(this._myNodeInfo);
         break;
       }
 
@@ -895,7 +927,389 @@ class MeshtasticService {
         this.onChannelPacket.dispatch(channel);
         break;
       }
+
+      case 'config': {
+        const configData = variant.value as {
+          payloadVariant?: { case: string; value: unknown };
+        };
+        if (configData.payloadVariant) {
+          this.handleConfigPayload(configData.payloadVariant);
+        }
+        break;
+      }
+
+      case 'moduleConfig': {
+        // ModuleConfig is processed but we don't expose it in UI for now
+        // as it contains technical module settings
+        break;
+      }
+
+      case 'metadata': {
+        const metadata = variant.value as {
+          firmwareVersion?: string;
+          deviceStateVersion?: number;
+          canShutdown?: boolean;
+          hasWifi?: boolean;
+          hasBluetooth?: boolean;
+          hasEthernet?: boolean;
+          role?: number;
+          positionFlags?: number;
+          hwModel?: number;
+          hasRemoteHardware?: boolean;
+        };
+        this._deviceMetadata = {
+          firmwareVersion: metadata.firmwareVersion,
+          deviceStateVersion: metadata.deviceStateVersion,
+          canShutdown: metadata.canShutdown,
+          hasWifi: metadata.hasWifi,
+          hasBluetooth: metadata.hasBluetooth,
+          hasEthernet: metadata.hasEthernet,
+          role: metadata.role !== undefined ? this.roleToString(metadata.role) : undefined,
+          positionFlags: metadata.positionFlags,
+          hwModel: metadata.hwModel !== undefined ? this.hwModelToString(metadata.hwModel) : undefined,
+          hasRemoteHardware: metadata.hasRemoteHardware,
+        };
+        this.onMetadataPacket.dispatch(this._deviceMetadata);
+        break;
+      }
     }
+  }
+
+  private handleConfigPayload(payload: { case: string; value: unknown }): void {
+    switch (payload.case) {
+      case 'device': {
+        const device = payload.value as {
+          role?: number;
+          serialEnabled?: boolean;
+          buttonGpio?: number;
+          buzzerGpio?: number;
+          rebroadcastMode?: number;
+          nodeInfoBroadcastSecs?: number;
+          doubleTapAsButtonPress?: boolean;
+          tzdef?: string;
+        };
+        this._deviceConfig = {
+          ...this._deviceConfig,
+          role: device.role !== undefined ? this.roleToString(device.role) : undefined,
+          serialEnabled: device.serialEnabled,
+          buttonGpio: device.buttonGpio,
+          buzzerGpio: device.buzzerGpio,
+          rebroadcastMode: device.rebroadcastMode !== undefined ? this.rebroadcastModeToString(device.rebroadcastMode) : undefined,
+          nodeInfoBroadcastSecs: device.nodeInfoBroadcastSecs,
+          doubleTapAsButtonPress: device.doubleTapAsButtonPress,
+          tzdef: device.tzdef,
+        };
+        this.onConfigPacket.dispatch(this._deviceConfig);
+        break;
+      }
+
+      case 'position': {
+        const position = payload.value as {
+          positionBroadcastSecs?: number;
+          positionBroadcastSmartEnabled?: boolean;
+          gpsUpdateInterval?: number;
+          gpsAttemptTime?: number;
+          positionFlags?: number;
+          rxGpio?: number;
+          txGpio?: number;
+          gpsEnGpio?: number;
+          fixedPosition?: boolean;
+        };
+        this._deviceConfig = {
+          ...this._deviceConfig,
+          positionBroadcastSecs: position.positionBroadcastSecs,
+          positionBroadcastSmartEnabled: position.positionBroadcastSmartEnabled,
+          gpsUpdateInterval: position.gpsUpdateInterval,
+          gpsAttemptTime: position.gpsAttemptTime,
+          positionFlags: position.positionFlags,
+          rxGpio: position.rxGpio,
+          txGpio: position.txGpio,
+          gpsEnGpio: position.gpsEnGpio,
+          fixedPosition: position.fixedPosition,
+        };
+        this.onConfigPacket.dispatch(this._deviceConfig);
+        break;
+      }
+
+      case 'power': {
+        const power = payload.value as {
+          isPowerSaving?: boolean;
+          onBatteryShutdownAfterSecs?: number;
+          adcMultiplierOverride?: number;
+          waitBluetoothSecs?: number;
+          sdsSecs?: number;
+          lsSecs?: number;
+          minWakeSecs?: number;
+        };
+        this._deviceConfig = {
+          ...this._deviceConfig,
+          isPowerSaving: power.isPowerSaving,
+          onBatteryShutdownAfterSecs: power.onBatteryShutdownAfterSecs,
+          adcMultiplierOverride: power.adcMultiplierOverride,
+          waitBluetoothSecs: power.waitBluetoothSecs,
+          sdsSecs: power.sdsSecs,
+          lsSecs: power.lsSecs,
+          minWakeSecs: power.minWakeSecs,
+        };
+        this.onConfigPacket.dispatch(this._deviceConfig);
+        break;
+      }
+
+      case 'network': {
+        const network = payload.value as {
+          wifiEnabled?: boolean;
+          wifiSsid?: string;
+          ethEnabled?: boolean;
+          ntpServer?: string;
+        };
+        this._deviceConfig = {
+          ...this._deviceConfig,
+          wifiEnabled: network.wifiEnabled,
+          wifiSsid: network.wifiSsid,
+          ethEnabled: network.ethEnabled,
+          ntpServer: network.ntpServer,
+        };
+        this.onConfigPacket.dispatch(this._deviceConfig);
+        break;
+      }
+
+      case 'display': {
+        const display = payload.value as {
+          screenOnSecs?: number;
+          gpsFormat?: number;
+          autoScreenCarouselSecs?: number;
+          compassNorthTop?: boolean;
+          flipScreen?: boolean;
+          units?: number;
+          oled?: number;
+        };
+        this._deviceConfig = {
+          ...this._deviceConfig,
+          screenOnSecs: display.screenOnSecs,
+          gpsFormat: display.gpsFormat !== undefined ? this.gpsFormatToString(display.gpsFormat) : undefined,
+          autoScreenCarouselSecs: display.autoScreenCarouselSecs,
+          compassNorthTop: display.compassNorthTop,
+          flipScreen: display.flipScreen,
+          units: display.units !== undefined ? this.unitsToString(display.units) : undefined,
+          oled: display.oled !== undefined ? this.oledToString(display.oled) : undefined,
+        };
+        this.onConfigPacket.dispatch(this._deviceConfig);
+        break;
+      }
+
+      case 'lora': {
+        const lora = payload.value as {
+          region?: number;
+          modemPreset?: number;
+          hopLimit?: number;
+          txPower?: number;
+          txEnabled?: boolean;
+          channelNum?: number;
+          bandwidth?: number;
+          spreadFactor?: number;
+          codingRate?: number;
+          frequencyOffset?: number;
+          overrideDutyCycle?: boolean;
+          ignoreMqtt?: boolean;
+          okToMqtt?: boolean;
+        };
+        this._deviceConfig = {
+          ...this._deviceConfig,
+          region: lora.region !== undefined ? this.regionToString(lora.region) : undefined,
+          modemPreset: lora.modemPreset !== undefined ? this.modemPresetToString(lora.modemPreset) : undefined,
+          hopLimit: lora.hopLimit,
+          txPower: lora.txPower,
+          txEnabled: lora.txEnabled,
+          channelNum: lora.channelNum,
+          bandwidth: lora.bandwidth,
+          spreadFactor: lora.spreadFactor,
+          codingRate: lora.codingRate,
+          frequencyOffset: lora.frequencyOffset,
+          overrideDutyCycle: lora.overrideDutyCycle,
+          ignoreMqtt: lora.ignoreMqtt,
+          okToMqtt: lora.okToMqtt,
+        };
+        this.onConfigPacket.dispatch(this._deviceConfig);
+        break;
+      }
+
+      case 'bluetooth': {
+        const bluetooth = payload.value as {
+          enabled?: boolean;
+          mode?: number;
+          fixedPin?: number;
+        };
+        this._deviceConfig = {
+          ...this._deviceConfig,
+          enabled: bluetooth.enabled,
+          mode: bluetooth.mode !== undefined ? this.btModeToString(bluetooth.mode) : undefined,
+          fixedPin: bluetooth.fixedPin,
+        };
+        this.onConfigPacket.dispatch(this._deviceConfig);
+        break;
+      }
+    }
+  }
+
+  // Helper methods to convert enum values to readable strings
+  private roleToString(role: number): string {
+    const roles: Record<number, string> = {
+      0: 'CLIENT',
+      1: 'CLIENT_MUTE',
+      2: 'ROUTER',
+      3: 'ROUTER_CLIENT',
+      4: 'REPEATER',
+      5: 'TRACKER',
+      6: 'SENSOR',
+      7: 'TAK',
+      8: 'CLIENT_HIDDEN',
+      9: 'LOST_AND_FOUND',
+      10: 'TAK_TRACKER',
+    };
+    return roles[role] ?? `UNKNOWN(${role})`;
+  }
+
+  private rebroadcastModeToString(mode: number): string {
+    const modes: Record<number, string> = {
+      0: 'ALL',
+      1: 'ALL_SKIP_DECODING',
+      2: 'LOCAL_ONLY',
+      3: 'KNOWN_ONLY',
+    };
+    return modes[mode] ?? `UNKNOWN(${mode})`;
+  }
+
+  private regionToString(region: number): string {
+    const regions: Record<number, string> = {
+      0: 'UNSET',
+      1: 'US',
+      2: 'EU_433',
+      3: 'EU_868',
+      4: 'CN',
+      5: 'JP',
+      6: 'ANZ',
+      7: 'KR',
+      8: 'TW',
+      9: 'RU',
+      10: 'IN',
+      11: 'NZ_865',
+      12: 'TH',
+      13: 'LORA_24',
+      14: 'UA_433',
+      15: 'UA_868',
+      16: 'MY_433',
+      17: 'MY_919',
+      18: 'SG_923',
+      19: 'PH_433',
+      20: 'PH_868',
+      21: 'PH_915',
+    };
+    return regions[region] ?? `UNKNOWN(${region})`;
+  }
+
+  private modemPresetToString(preset: number): string {
+    const presets: Record<number, string> = {
+      0: 'LONG_FAST',
+      1: 'LONG_SLOW',
+      2: 'VERY_LONG_SLOW',
+      3: 'MEDIUM_SLOW',
+      4: 'MEDIUM_FAST',
+      5: 'SHORT_SLOW',
+      6: 'SHORT_FAST',
+      7: 'LONG_MODERATE',
+      8: 'SHORT_TURBO',
+    };
+    return presets[preset] ?? `UNKNOWN(${preset})`;
+  }
+
+  private gpsFormatToString(format: number): string {
+    const formats: Record<number, string> = {
+      0: 'DEC',
+      1: 'DMS',
+      2: 'UTM',
+      3: 'MGRS',
+      4: 'OLC',
+      5: 'OSGR',
+    };
+    return formats[format] ?? `UNKNOWN(${format})`;
+  }
+
+  private unitsToString(units: number): string {
+    return units === 0 ? 'METRIC' : 'IMPERIAL';
+  }
+
+  private oledToString(oled: number): string {
+    const types: Record<number, string> = {
+      0: 'AUTO',
+      1: 'SSD1306',
+      2: 'SH1106',
+      3: 'SH1107',
+    };
+    return types[oled] ?? `UNKNOWN(${oled})`;
+  }
+
+  private btModeToString(mode: number): string {
+    const modes: Record<number, string> = {
+      0: 'RANDOM_PIN',
+      1: 'FIXED_PIN',
+      2: 'NO_PIN',
+    };
+    return modes[mode] ?? `UNKNOWN(${mode})`;
+  }
+
+  private hwModelToString(model: number): string {
+    const models: Record<number, string> = {
+      0: 'UNSET',
+      1: 'TLORA_V2',
+      2: 'TLORA_V1',
+      3: 'TLORA_V2_1_1P6',
+      4: 'TBEAM',
+      5: 'HELTEC_V2_0',
+      6: 'TBEAM_V0P7',
+      7: 'T_ECHO',
+      8: 'TLORA_V1_1P3',
+      9: 'RAK4631',
+      10: 'HELTEC_V2_1',
+      11: 'HELTEC_V1',
+      12: 'LILYGO_TBEAM_S3_CORE',
+      13: 'RAK11200',
+      14: 'NANO_G1',
+      15: 'TLORA_V2_1_1P8',
+      16: 'TLORA_T3_S3',
+      17: 'NANO_G1_EXPLORER',
+      18: 'NANO_G2_ULTRA',
+      19: 'LORA_TYPE',
+      25: 'STATION_G1',
+      26: 'RAK11310',
+      32: 'HELTEC_WIRELESS_PAPER',
+      33: 'HELTEC_WIRELESS_PAPER_V1_0',
+      34: 'HELTEC_WIRELESS_TRACKER',
+      35: 'HELTEC_WIRELESS_TRACKER_V1_0',
+      36: 'HELTEC_VISION_MASTER_T190',
+      37: 'HELTEC_VISION_MASTER_E213',
+      38: 'HELTEC_VISION_MASTER_E290',
+      39: 'HELTEC_MESH_NODE_T114',
+      40: 'T_WATCH_S3',
+      41: 'PICOMPUTER_S3',
+      42: 'HELTEC_HT62',
+      43: 'EBYTE_ESP32_S3',
+      44: 'ESP32_S3_PICO',
+      45: 'CHATTER_2',
+      47: 'HELTEC_WIRELESS_PAPER_V1_1',
+      48: 'HELTEC_WIRELESS_TRACKER_V1_1',
+      49: 'UNPHONE',
+      50: 'TD_LORAC',
+      51: 'CDEBYTE_EORA_S3',
+      52: 'TWC_MESH_V4',
+      53: 'NRF52_PROMICRO_DIY',
+      54: 'RADIOMASTER_900_BANDIT_NANO',
+      55: 'HELTEC_CAPSULE_SENSOR_V3',
+      56: 'HELTEC_VISION_MASTER_T',
+      57: 'HELTEC_VISION_MASTER_E',
+      58: 'HELTEC_MESH_NODE_114',
+      255: 'PRIVATE_HW',
+    };
+    return models[model] ?? `HW_MODEL(${model})`;
   }
 
   private async handleMeshPacket(packet: unknown): Promise<void> {
