@@ -14,6 +14,7 @@ import {
   Keyboard,
   Switch,
   ActivityIndicator,
+  StatusBar,
 } from 'react-native';
 import { Device, BleManager } from 'react-native-ble-plx';
 import QRCode from 'react-native-qrcode-svg';
@@ -34,15 +35,19 @@ import { useOfflineMap } from '../hooks/useOfflineMap';
 MapLibreGL.setAccessToken(null);
 
 interface DeviceDetailScreenProps {
-  device: Device;
+  device: Device | null;
   bleManager: BleManager;
   onBack: () => void;
+  onOpenScanner?: () => void;
+  isOffline?: boolean;
 }
 
 export default function DeviceDetailScreen({
   device,
   bleManager,
   onBack,
+  onOpenScanner,
+  isOffline = false,
 }: DeviceDetailScreenProps) {
   // Storage hook
   const {
@@ -905,7 +910,7 @@ export default function DeviceDetailScreen({
         <View style={styles.nodeStatusCard}>
           <View style={styles.nodeStatusRow}>
             <Text style={styles.nodeStatusLabel}>Название</Text>
-            <Text style={styles.nodeStatusValue}>{device.name || 'Неизвестно'}</Text>
+            <Text style={styles.nodeStatusValue}>{device?.name || 'Неизвестно'}</Text>
           </View>
           <View style={styles.nodeStatusRow}>
             <Text style={styles.nodeStatusLabel}>Статус</Text>
@@ -1251,6 +1256,37 @@ export default function DeviceDetailScreen({
   const renderSettingsTab = () => {
     return (
       <ScrollView style={styles.nodesList} showsVerticalScrollIndicator={false}>
+        {/* Radio Connection */}
+        <Text style={styles.sectionHeader}>РАЦИЯ</Text>
+        <View style={styles.nodeStatusCard}>
+          <View style={styles.nodeStatusRow}>
+            <Text style={styles.nodeStatusLabel}>Статус</Text>
+            <View style={styles.connectionStatusContainer}>
+              <View style={[
+                styles.connectionStatusDot,
+                { backgroundColor: isOffline || !device ? '#FF9500' : '#31B545' }
+              ]} />
+              <Text style={[
+                styles.nodeStatusValue,
+                { color: isOffline || !device ? '#FF9500' : '#31B545' }
+              ]}>
+                {isOffline || !device ? 'Не подключена' : 'Подключена'}
+              </Text>
+            </View>
+          </View>
+          {onOpenScanner && (
+            <TouchableOpacity
+              style={styles.settingsButton}
+              onPress={onOpenScanner}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.settingsButtonText}>
+                {isOffline || !device ? 'Подключить рацию' : 'Подключить другую рацию'}
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
         {/* GPS Settings */}
         <Text style={styles.sectionHeader}>ГЕОЛОКАЦИЯ</Text>
         <View style={styles.nodeStatusCard}>
@@ -1637,23 +1673,28 @@ export default function DeviceDetailScreen({
   };
 
   const getStatusInfo = () => {
+    // Offline mode (no device)
+    if (isOffline || !device) {
+      return { text: 'Нет подключения', color: '#FF9500', showSpinner: false, showConnect: true };
+    }
     if (deviceStatus === DeviceStatusEnum.DeviceConfigured) {
-      return { text: 'Подключено', color: '#31B545', showSpinner: false };
+      return { text: 'Подключено', color: '#31B545', showSpinner: false, showConnect: false };
     }
     if (deviceStatus === DeviceStatusEnum.DeviceReconnecting) {
       return {
         text: `Переподключение (${meshtasticService.reconnectAttemptsCount}/${meshtasticService.maxReconnectAttempts})`,
         color: '#FF9500',
-        showSpinner: true
+        showSpinner: true,
+        showConnect: false
       };
     }
     if (deviceStatus === DeviceStatusEnum.DeviceConnecting) {
-      return { text: 'Подключение...', color: '#2AABEE', showSpinner: true };
+      return { text: 'Подключение...', color: '#2AABEE', showSpinner: true, showConnect: false };
     }
     if (deviceStatus === DeviceStatusEnum.DeviceConfiguring) {
-      return { text: 'Загрузка...', color: '#2AABEE', showSpinner: true };
+      return { text: 'Загрузка...', color: '#2AABEE', showSpinner: true, showConnect: false };
     }
-    return { text: 'Отключено', color: '#FF3B30', showSpinner: false };
+    return { text: 'Отключено', color: '#FF3B30', showSpinner: false, showConnect: true };
   };
 
   const statusInfo = getStatusInfo();
@@ -1663,32 +1704,24 @@ export default function DeviceDetailScreen({
       {/* Top Status Bar - visible on all screens except open chat */}
       {!openChat && (
         <View style={styles.topStatusBar}>
-          <TouchableOpacity onPress={handleDisconnect} style={styles.topStatusBackButton}>
-            <Text style={styles.topStatusBackText}>‹</Text>
-          </TouchableOpacity>
-
           <View style={styles.topStatusCenter}>
-            <View style={styles.topStatusRow}>
-              {statusInfo.showSpinner ? (
-                <ActivityIndicator size="small" color={statusInfo.color} style={styles.topStatusSpinner} />
-              ) : (
-                <View style={[styles.topStatusDot, { backgroundColor: statusInfo.color }]} />
-              )}
-              <Text style={[styles.topStatusText, { color: statusInfo.color }]}>
-                {statusInfo.text}
-              </Text>
-            </View>
-          </View>
-
-          <View style={styles.topStatusRight}>
-            {deviceTelemetry.batteryLevel !== undefined && (
-              <View style={styles.topStatusBattery}>
-                <Text style={styles.topStatusBatteryText}>
-                  {deviceTelemetry.batteryLevel}%
-                </Text>
-                <Text style={styles.topStatusBatteryIcon}>
-                  {deviceTelemetry.batteryLevel > 80 ? '🔋' :
-                   deviceTelemetry.batteryLevel > 20 ? '🔋' : '🪫'}
+            {statusInfo.showConnect && onOpenScanner ? (
+              <TouchableOpacity
+                style={styles.topConnectButton}
+                onPress={onOpenScanner}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.topConnectButtonText}>Подключить рацию</Text>
+              </TouchableOpacity>
+            ) : (
+              <View style={styles.topStatusRow}>
+                {statusInfo.showSpinner ? (
+                  <ActivityIndicator size="small" color={statusInfo.color} style={styles.topStatusSpinner} />
+                ) : (
+                  <View style={[styles.topStatusDot, { backgroundColor: statusInfo.color }]} />
+                )}
+                <Text style={[styles.topStatusText, { color: statusInfo.color }]}>
+                  {statusInfo.text}
                 </Text>
               </View>
             )}
@@ -2096,6 +2129,29 @@ const styles = StyleSheet.create({
   bottomPadding: {
     height: 100,
   },
+  connectionStatusContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  connectionStatusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+  settingsButton: {
+    backgroundColor: '#2AABEE',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginTop: 12,
+  },
+  settingsButtonText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '600',
+  },
   tabBar: {
     flexDirection: 'row',
     backgroundColor: '#FFFFFF',
@@ -2159,7 +2215,7 @@ const styles = StyleSheet.create({
   chatHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingTop: Platform.OS === 'ios' ? 50 : 16,
+    paddingTop: Platform.OS === 'ios' ? 50 : (StatusBar.currentHeight || 24) + 12,
     paddingBottom: 12,
     paddingHorizontal: 16,
     backgroundColor: '#FFFFFF',
@@ -2551,9 +2607,9 @@ const styles = StyleSheet.create({
   topStatusBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingTop: Platform.OS === 'ios' ? 50 : 16,
-    paddingBottom: 12,
-    paddingHorizontal: 12,
+    paddingTop: Platform.OS === 'ios' ? 54 : (StatusBar.currentHeight || 24) + 12,
+    paddingBottom: 16,
+    paddingHorizontal: 16,
     backgroundColor: '#FFFFFF',
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: '#E5E5EA',
@@ -2578,6 +2634,17 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
   },
+  topConnectButton: {
+    backgroundColor: '#2AABEE',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 16,
+  },
+  topConnectButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '600',
+  },
   topStatusDot: {
     width: 8,
     height: 8,
@@ -2593,20 +2660,39 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   topStatusRight: {
-    width: 60,
     alignItems: 'flex-end',
   },
-  topStatusBattery: {
+  batteryContainer: {
     flexDirection: 'row',
     alignItems: 'center',
   },
-  topStatusBatteryText: {
+  batteryBody: {
+    width: 28,
+    height: 12,
+    borderWidth: 1.5,
+    borderColor: '#8E8E93',
+    borderRadius: 3,
+    overflow: 'hidden',
+    justifyContent: 'center',
+  },
+  batteryFill: {
+    height: '100%',
+    borderRadius: 1,
+  },
+  batteryTip: {
+    width: 3,
+    height: 6,
+    backgroundColor: '#8E8E93',
+    borderTopRightRadius: 2,
+    borderBottomRightRadius: 2,
+    marginLeft: 1,
+  },
+  batteryText: {
     fontSize: 12,
     color: '#8E8E93',
-    marginRight: 2,
-  },
-  topStatusBatteryIcon: {
-    fontSize: 14,
+    marginLeft: 6,
+    fontWeight: '500',
+    minWidth: 32,
   },
   errorBanner: {
     backgroundColor: '#FFEBEE',

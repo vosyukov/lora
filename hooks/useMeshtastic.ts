@@ -39,7 +39,7 @@ export interface UseMeshtasticResult {
 }
 
 export function useMeshtastic(
-  device: Device,
+  device: Device | null,
   onMessage?: (message: Message) => void,
   onAck?: (packetId: number, success: boolean) => void
 ): UseMeshtasticResult {
@@ -65,6 +65,12 @@ export function useMeshtastic(
 
   // Connect to device and subscribe to events
   useEffect(() => {
+    // Skip if no device (offline mode)
+    if (!device) {
+      setDeviceStatus(DeviceStatusEnum.DeviceDisconnected);
+      return;
+    }
+
     const subscriptions = [
       meshtasticService.onDeviceStatus.subscribe(setDeviceStatus),
       meshtasticService.onMyNodeInfo.subscribe((info) => {
