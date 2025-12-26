@@ -96,10 +96,21 @@ export default function HomeScreen() {
 
   // Auto-connect when bluetooth is ready and we have a saved device
   useEffect(() => {
-    if (bluetoothState === State.PoweredOn && lastDeviceId && step === 'loading') {
-      autoConnectToLastDevice();
-    } else if (bluetoothState === State.PoweredOn && step === 'loading' && lastDeviceId === null) {
+    if (step !== 'loading') return;
+
+    // Bluetooth выключен или недоступен - показываем welcome с предупреждением
+    if (bluetoothState === State.PoweredOff || bluetoothState === State.Unauthorized) {
       setStep('welcome');
+      return;
+    }
+
+    // Bluetooth готов
+    if (bluetoothState === State.PoweredOn) {
+      if (lastDeviceId) {
+        autoConnectToLastDevice();
+      } else if (lastDeviceId === null) {
+        setStep('welcome');
+      }
     }
   }, [bluetoothState, lastDeviceId, step]);
 
@@ -137,6 +148,7 @@ export default function HomeScreen() {
     if (!lastDeviceId) return;
 
     setStep('auto_connecting');
+    let deviceFound = false;
 
     bleManager.startDeviceScan(
       [MESHTASTIC_SERVICE_UUID],
@@ -149,6 +161,7 @@ export default function HomeScreen() {
         }
 
         if (device && device.id === lastDeviceId) {
+          deviceFound = true;
           bleManager.stopDeviceScan();
 
           try {
@@ -172,7 +185,7 @@ export default function HomeScreen() {
 
     // Timeout for auto-connect scan
     setTimeout(() => {
-      if (step === 'auto_connecting') {
+      if (!deviceFound) {
         bleManager.stopDeviceScan();
         setStep('welcome');
       }

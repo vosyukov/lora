@@ -47,7 +47,7 @@ export interface Message {
   channel?: number;
 }
 
-export type ActiveTab = 'people' | 'chat' | 'map' | 'settings';
+export type ActiveTab = 'chat' | 'map' | 'settings';
 
 export interface MeshtasticDevice {
   id: string;

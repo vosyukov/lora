@@ -12,17 +12,20 @@ import {
   KeyboardAvoidingView,
   Modal,
   Share,
+  Keyboard,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Device } from 'react-native-ble-plx';
 import QRCode from 'react-native-qrcode-svg';
 
 import { meshtasticService } from '../services/MeshtasticService';
+import { notificationService } from '../services/NotificationService';
 import type { NodeInfo, Message, ActiveTab, Channel, ChatTarget } from '../types';
 import { DeviceStatusEnum, ChannelRole } from '../types';
 import {
   FRIENDS_STORAGE_KEY,
   MESSAGES_STORAGE_KEY,
+  LAST_READ_STORAGE_KEY,
   MAX_STORED_MESSAGES,
 } from '../constants/meshtastic';
 
@@ -42,7 +45,7 @@ export default function DeviceDetailScreen({
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [friendIds, setFriendIds] = useState<Set<number>>(new Set());
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<ActiveTab>('people');
+  const [activeTab, setActiveTab] = useState<ActiveTab>('chat');
   const [messages, setMessages] = useState<Message[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [openChat, setOpenChat] = useState<ChatTarget | null>(null);
@@ -52,6 +55,7 @@ export default function DeviceDetailScreen({
   const [newGroupEncryption, setNewGroupEncryption] = useState<'none' | 'aes128' | 'aes256'>('aes256');
   const [showShareModal, setShowShareModal] = useState(false);
   const [shareChannelUrl, setShareChannelUrl] = useState<string | null>(null);
+  const [lastReadTimestamps, setLastReadTimestamps] = useState<Record<string, number>>({});
 
   const scrollViewRef = useRef<ScrollView>(null);
 
@@ -92,6 +96,38 @@ export default function DeviceDetailScreen({
     }
   }, [messages, openChat, myNodeNum]);
 
+  // Scroll to bottom when chat opens or new messages arrive
+  useEffect(() => {
+    if (openChat && chatMessages.length > 0) {
+      setTimeout(() => {
+        scrollViewRef.current?.scrollToEnd({ animated: false });
+      }, 100);
+    }
+  }, [openChat]);
+
+  useEffect(() => {
+    if (openChat && chatMessages.length > 0) {
+      setTimeout(() => {
+        scrollViewRef.current?.scrollToEnd({ animated: true });
+      }, 100);
+    }
+  }, [chatMessages.length]);
+
+  // Scroll to bottom when keyboard appears
+  useEffect(() => {
+    const keyboardDidShowListener = Keyboard.addListener('keyboardDidShow', () => {
+      if (openChat) {
+        setTimeout(() => {
+          scrollViewRef.current?.scrollToEnd({ animated: true });
+        }, 100);
+      }
+    });
+
+    return () => {
+      keyboardDidShowListener.remove();
+    };
+  }, [openChat]);
+
   // Chat list (unique DM conversations, excluding channel messages)
   const chatList = useMemo(() => {
     const chats = new Map<number, { nodeNum: number; lastMessage: Message }>();
@@ -115,10 +151,16 @@ export default function DeviceDetailScreen({
     );
   }, [messages, myNodeNum]);
 
-  // Load data from storage
+  // Load data from storage and initialize notifications
   useEffect(() => {
     loadFriends();
     loadMessages();
+    loadLastRead();
+    notificationService.initialize();
+
+    return () => {
+      notificationService.cleanup();
+    };
   }, []);
 
   // Connect to device and subscribe to events
@@ -176,25 +218,31 @@ export default function DeviceDetailScreen({
           (openChat.type === 'channel' && openChat.id === msg.channel)
         );
 
-        if (!isChatOpen) {
+        if (!isChatOpen && !msg.isOutgoing) {
           if (isChannelMessage) {
             const channel = meshtasticService.getChannel(msg.channel ?? 0);
-            const channelName = channel?.name || `Channel ${msg.channel ?? 0}`;
+            const channelName = channel?.name || `Канал ${msg.channel ?? 0}`;
+            // Show push notification when app is in background
+            notificationService.showMessageNotification(senderName, msg.text, true, channelName);
+            // Show in-app alert
             Alert.alert(
               `#${channelName}`,
               `${senderName}: ${msg.text.length > 40 ? msg.text.substring(0, 40) + '...' : msg.text}`,
               [
-                { text: 'Close', style: 'cancel' },
-                { text: 'Open', onPress: () => openChatHandler({ type: 'channel', id: msg.channel ?? 0 }) },
+                { text: 'Закрыть', style: 'cancel' },
+                { text: 'Открыть', onPress: () => openChatHandler({ type: 'channel', id: msg.channel ?? 0 }) },
               ]
             );
           } else {
+            // Show push notification when app is in background
+            notificationService.showMessageNotification(senderName, msg.text, false);
+            // Show in-app alert
             Alert.alert(
               senderName,
               msg.text.length > 50 ? msg.text.substring(0, 50) + '...' : msg.text,
               [
-                { text: 'Close', style: 'cancel' },
-                { text: 'Open', onPress: () => openChatHandler({ type: 'dm', id: msg.from }) },
+                { text: 'Закрыть', style: 'cancel' },
+                { text: 'Открыть', onPress: () => openChatHandler({ type: 'dm', id: msg.from }) },
               ]
             );
           }
@@ -261,6 +309,56 @@ export default function DeviceDetailScreen({
       await AsyncStorage.setItem(MESSAGES_STORAGE_KEY, JSON.stringify(toSave));
     } catch {
       // Ignore save errors
+    }
+  };
+
+  const loadLastRead = async () => {
+    try {
+      const stored = await AsyncStorage.getItem(LAST_READ_STORAGE_KEY);
+      if (stored) {
+        setLastReadTimestamps(JSON.parse(stored));
+      }
+    } catch {
+      // Ignore load errors
+    }
+  };
+
+  const saveLastRead = async (timestamps: Record<string, number>) => {
+    try {
+      await AsyncStorage.setItem(LAST_READ_STORAGE_KEY, JSON.stringify(timestamps));
+    } catch {
+      // Ignore save errors
+    }
+  };
+
+  const getChatKey = (target: ChatTarget): string => {
+    return target.type === 'dm' ? `dm_${target.id}` : `channel_${target.id}`;
+  };
+
+  const markChatAsRead = (target: ChatTarget) => {
+    const key = getChatKey(target);
+    const newTimestamps = { ...lastReadTimestamps, [key]: Date.now() };
+    setLastReadTimestamps(newTimestamps);
+    saveLastRead(newTimestamps);
+  };
+
+  const getUnreadCount = (target: ChatTarget): number => {
+    const key = getChatKey(target);
+    const lastRead = lastReadTimestamps[key] || 0;
+
+    if (target.type === 'dm') {
+      return messages.filter(m =>
+        m.from === target.id &&
+        m.to === myNodeNum &&
+        !m.isOutgoing &&
+        m.timestamp > lastRead
+      ).length;
+    } else {
+      return messages.filter(m =>
+        m.channel === target.id &&
+        !m.isOutgoing &&
+        m.timestamp > lastRead
+      ).length;
     }
   };
 
@@ -425,7 +523,7 @@ export default function DeviceDetailScreen({
 
   const openChatHandler = (target: ChatTarget) => {
     setOpenChat(target);
-    setActiveTab('chat');
+    markChatAsRead(target);
   };
 
   const handleNodePress = (node: NodeInfo) => {
@@ -474,90 +572,6 @@ export default function DeviceDetailScreen({
     return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
   };
 
-  const renderNodeCard = (node: NodeInfo, isFriend: boolean = false) => (
-    <TouchableOpacity
-      key={node.nodeNum}
-      style={styles.nodeCard}
-      onPress={() => handleNodePress(node)}
-      activeOpacity={0.7}
-    >
-      <View style={[
-        styles.nodeAvatar,
-        isFriend && styles.friendAvatar,
-      ]}>
-        <Text style={styles.nodeAvatarText}>{getInitials(node)}</Text>
-      </View>
-      <View style={styles.nodeInfo}>
-        <Text style={styles.nodeName}>{getNodeName(node)}</Text>
-        <Text style={styles.nodeDetail}>
-          {isFriend ? 'Online' : 'Nearby'}
-        </Text>
-      </View>
-      {!isFriend && (
-        <TouchableOpacity
-          style={styles.addButton}
-          onPress={() => addFriend(node.nodeNum)}
-          activeOpacity={0.7}
-        >
-          <Text style={styles.addButtonText}>+</Text>
-        </TouchableOpacity>
-      )}
-      {isFriend && (
-        <Text style={styles.chevron}>›</Text>
-      )}
-    </TouchableOpacity>
-  );
-
-  const renderPeopleTab = () => (
-    <ScrollView style={styles.nodesList} showsVerticalScrollIndicator={false}>
-      {friends.length > 0 && (
-        <>
-          <Text style={styles.sectionHeader}>
-            FRIENDS ({friends.length})
-          </Text>
-          {friends.map(node => renderNodeCard(node, true))}
-        </>
-      )}
-
-      {nearby.length > 0 && (
-        <>
-          <View style={styles.sectionHeaderRow}>
-            <Text style={styles.sectionHeader}>
-              NEARBY ({nearby.length})
-            </Text>
-          </View>
-          <View style={styles.sectionHint}>
-            <Text style={styles.sectionHintText}>
-              These radios are in range. Tap + to add as friend.
-            </Text>
-          </View>
-          {nearby.map(node => renderNodeCard(node, false))}
-        </>
-      )}
-
-      {nodes.length === 0 && deviceStatus === DeviceStatusEnum.DeviceConfigured && (
-        <View style={styles.emptyState}>
-          <Text style={styles.emptyIcon}>📡</Text>
-          <Text style={styles.emptyTitle}>No one nearby</Text>
-          <Text style={styles.emptyText}>
-            When friends turn on their radios, they will appear here
-          </Text>
-        </View>
-      )}
-
-      {friends.length === 0 && nearby.length > 0 && (
-        <View style={styles.tipCard}>
-          <Text style={styles.tipIcon}>💡</Text>
-          <Text style={styles.tipText}>
-            Add friends to quickly find them in the list and on the map
-          </Text>
-        </View>
-      )}
-
-      <View style={styles.bottomPadding} />
-    </ScrollView>
-  );
-
   const renderChannelItem = (channel: Channel) => {
     // Get last message for this channel
     const channelMessages = messages.filter(m => m.channel === channel.index);
@@ -566,12 +580,13 @@ export default function DeviceDetailScreen({
       : null;
 
     const canDelete = channel.role !== ChannelRole.PRIMARY;
+    const unreadCount = getUnreadCount({ type: 'channel', id: channel.index });
 
     return (
       <TouchableOpacity
         key={`channel-${channel.index}`}
         style={styles.chatListItem}
-        onPress={() => setOpenChat({ type: 'channel', id: channel.index })}
+        onPress={() => openChatHandler({ type: 'channel', id: channel.index })}
         onLongPress={canDelete ? () => handleDeleteChannel(channel) : undefined}
         activeOpacity={0.7}
       >
@@ -580,7 +595,7 @@ export default function DeviceDetailScreen({
         </View>
         <View style={styles.chatListInfo}>
           <View style={styles.chatListHeader}>
-            <Text style={styles.chatListName}>
+            <Text style={[styles.chatListName, unreadCount > 0 && styles.chatListNameUnread]}>
               {channel.name}
               {channel.role === ChannelRole.PRIMARY && ' (Primary)'}
             </Text>
@@ -590,57 +605,70 @@ export default function DeviceDetailScreen({
               </Text>
             )}
           </View>
-          <Text style={styles.chatListPreview} numberOfLines={1}>
+          <Text style={[styles.chatListPreview, unreadCount > 0 && styles.chatListPreviewUnread]} numberOfLines={1}>
             {lastMessage
-              ? (lastMessage.isOutgoing ? 'You: ' : '') + lastMessage.text
-              : channel.hasEncryption ? 'Encrypted channel' : 'Open channel'
+              ? (lastMessage.isOutgoing ? 'Вы: ' : '') + lastMessage.text
+              : channel.hasEncryption ? 'Зашифрованный канал' : 'Открытый канал'
             }
           </Text>
         </View>
-        {channel.hasEncryption && (
+        {unreadCount > 0 && (
+          <View style={styles.unreadBadge}>
+            <Text style={styles.unreadBadgeText}>{unreadCount > 99 ? '99+' : unreadCount}</Text>
+          </View>
+        )}
+        {unreadCount === 0 && channel.hasEncryption && (
           <Text style={styles.lockIcon}>🔒</Text>
         )}
       </TouchableOpacity>
     );
   };
 
-  const renderChatList = () => (
-    <ScrollView style={styles.nodesList} showsVerticalScrollIndicator={false}>
-      {/* Groups (Channels) section */}
-      <View style={styles.sectionHeaderRow}>
-        <Text style={styles.sectionHeader}>
-          GROUPS {activeChannels.length > 0 ? `(${activeChannels.length})` : ''}
-        </Text>
-        <TouchableOpacity
-          style={styles.createGroupButton}
-          onPress={() => setShowCreateGroup(true)}
-          activeOpacity={0.7}
-        >
-          <Text style={styles.createGroupButtonText}>+ Create</Text>
-        </TouchableOpacity>
-      </View>
+  const renderChatList = () => {
+    // Friends with chat history (from chatList)
+    const friendsWithChats = new Set(chatList.map(c => c.nodeNum));
+    // Friends without chat history
+    const friendsWithoutChats = friends.filter(f => !friendsWithChats.has(f.nodeNum));
 
-      {activeChannels.length > 0 ? (
-        activeChannels.map(channel => renderChannelItem(channel))
-      ) : (
-        <View style={styles.emptyGroupsHint}>
-          <Text style={styles.emptyGroupsText}>
-            Create a group to chat with multiple people at once
+    return (
+      <ScrollView style={styles.nodesList} showsVerticalScrollIndicator={false}>
+        {/* Groups (Channels) section */}
+        <View style={styles.sectionHeaderRow}>
+          <Text style={styles.sectionHeader}>
+            ГРУППЫ {activeChannels.length > 0 ? `(${activeChannels.length})` : ''}
           </Text>
+          <TouchableOpacity
+            style={styles.createGroupButton}
+            onPress={() => setShowCreateGroup(true)}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.createGroupButtonText}>+ Создать</Text>
+          </TouchableOpacity>
         </View>
-      )}
 
-      {/* DM Messages section */}
-      <Text style={styles.sectionHeader}>MESSAGES</Text>
+        {activeChannels.length > 0 ? (
+          activeChannels.map(channel => renderChannelItem(channel))
+        ) : (
+          <View style={styles.emptyGroupsHint}>
+            <Text style={styles.emptyGroupsText}>
+              Создайте группу для общения с несколькими людьми
+            </Text>
+          </View>
+        )}
 
-      {chatList.length > 0 ? (
-        chatList.map(chat => {
+        {/* Messages section - chats + friends without chats */}
+        <Text style={styles.sectionHeader}>
+          СООБЩЕНИЯ {(chatList.length + friendsWithoutChats.length) > 0 ? `(${chatList.length + friendsWithoutChats.length})` : ''}
+        </Text>
+
+        {chatList.map(chat => {
           const node = getNodeByNum(chat.nodeNum);
+          const unreadCount = getUnreadCount({ type: 'dm', id: chat.nodeNum });
           return (
             <TouchableOpacity
               key={chat.nodeNum}
               style={styles.chatListItem}
-              onPress={() => setOpenChat({ type: 'dm', id: chat.nodeNum })}
+              onPress={() => openChatHandler({ type: 'dm', id: chat.nodeNum })}
               activeOpacity={0.7}
             >
               <View style={[styles.nodeAvatar, styles.friendAvatar]}>
@@ -648,33 +676,102 @@ export default function DeviceDetailScreen({
               </View>
               <View style={styles.chatListInfo}>
                 <View style={styles.chatListHeader}>
-                  <Text style={styles.chatListName}>{getNodeName(node)}</Text>
+                  <Text style={[styles.chatListName, unreadCount > 0 && styles.chatListNameUnread]}>
+                    {getNodeName(node)}
+                  </Text>
                   <Text style={styles.chatListTime}>
                     {formatTime(chat.lastMessage.timestamp)}
                   </Text>
                 </View>
-                <Text style={styles.chatListPreview} numberOfLines={1}>
-                  {chat.lastMessage.isOutgoing ? 'You: ' : ''}{chat.lastMessage.text}
+                <Text style={[styles.chatListPreview, unreadCount > 0 && styles.chatListPreviewUnread]} numberOfLines={1}>
+                  {chat.lastMessage.isOutgoing ? 'Вы: ' : ''}{chat.lastMessage.text}
                 </Text>
               </View>
+              {unreadCount > 0 && (
+                <View style={styles.unreadBadge}>
+                  <Text style={styles.unreadBadgeText}>{unreadCount > 99 ? '99+' : unreadCount}</Text>
+                </View>
+              )}
             </TouchableOpacity>
           );
-        })
-      ) : (
-        activeChannels.length === 0 && (
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyIcon}>💬</Text>
-            <Text style={styles.emptyTitle}>No messages</Text>
-            <Text style={styles.emptyText}>
-              Tap on a friend in the People tab to start a conversation
+        })}
+
+        {friendsWithoutChats.map(node => (
+          <TouchableOpacity
+            key={node.nodeNum}
+            style={styles.chatListItem}
+            onPress={() => openChatHandler({ type: 'dm', id: node.nodeNum })}
+            onLongPress={() => handleNodePress(node)}
+            activeOpacity={0.7}
+          >
+            <View style={[styles.nodeAvatar, styles.friendAvatar]}>
+              <Text style={styles.nodeAvatarText}>{getInitials(node)}</Text>
+            </View>
+            <View style={styles.chatListInfo}>
+              <Text style={styles.chatListName}>{getNodeName(node)}</Text>
+              <Text style={styles.chatListPreview}>Нажмите чтобы написать</Text>
+            </View>
+          </TouchableOpacity>
+        ))}
+
+        {chatList.length === 0 && friendsWithoutChats.length === 0 && (
+          <View style={styles.emptyGroupsHint}>
+            <Text style={styles.emptyGroupsText}>
+              Добавьте друзей из секции «Рядом» ниже
             </Text>
           </View>
-        )
-      )}
+        )}
 
-      <View style={styles.bottomPadding} />
-    </ScrollView>
-  );
+        {/* Nearby section */}
+        {nearby.length > 0 && (
+          <>
+            <Text style={styles.sectionHeader}>РЯДОМ ({nearby.length})</Text>
+            <View style={styles.sectionHint}>
+              <Text style={styles.sectionHintText}>
+                Эти рации в зоне действия. Нажмите + чтобы добавить в друзья.
+              </Text>
+            </View>
+            {nearby.map(node => (
+              <TouchableOpacity
+                key={node.nodeNum}
+                style={styles.nodeCard}
+                onPress={() => handleNodePress(node)}
+                activeOpacity={0.7}
+              >
+                <View style={styles.nodeAvatar}>
+                  <Text style={styles.nodeAvatarText}>{getInitials(node)}</Text>
+                </View>
+                <View style={styles.nodeInfo}>
+                  <Text style={styles.nodeName}>{getNodeName(node)}</Text>
+                  <Text style={styles.nodeDetail}>В сети</Text>
+                </View>
+                <TouchableOpacity
+                  style={styles.addButton}
+                  onPress={() => addFriend(node.nodeNum)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.addButtonText}>+</Text>
+                </TouchableOpacity>
+              </TouchableOpacity>
+            ))}
+          </>
+        )}
+
+        {/* Empty state when nothing */}
+        {activeChannels.length === 0 && chatList.length === 0 && friends.length === 0 && nearby.length === 0 && (
+          <View style={styles.emptyState}>
+            <Text style={styles.emptyIcon}>📡</Text>
+            <Text style={styles.emptyTitle}>Никого рядом</Text>
+            <Text style={styles.emptyText}>
+              Когда друзья включат свои рации, они появятся здесь
+            </Text>
+          </View>
+        )}
+
+        <View style={styles.bottomPadding} />
+      </ScrollView>
+    );
+  };
 
   const renderOpenChat = () => {
     if (!openChat) return null;
@@ -851,20 +948,19 @@ export default function DeviceDetailScreen({
         </View>
       )}
 
-      {activeTab === 'people' && renderPeopleTab()}
       {activeTab === 'chat' && renderChatTab()}
       {activeTab === 'map' && (
         <View style={styles.emptyState}>
           <Text style={styles.emptyIcon}>🗺️</Text>
-          <Text style={styles.emptyTitle}>Map</Text>
-          <Text style={styles.emptyText}>Map with friends coming soon</Text>
+          <Text style={styles.emptyTitle}>Карта</Text>
+          <Text style={styles.emptyText}>Карта с друзьями скоро будет</Text>
         </View>
       )}
       {activeTab === 'settings' && (
         <View style={styles.emptyState}>
           <Text style={styles.emptyIcon}>⚙️</Text>
-          <Text style={styles.emptyTitle}>Settings</Text>
-          <Text style={styles.emptyText}>Settings coming soon</Text>
+          <Text style={styles.emptyTitle}>Настройки</Text>
+          <Text style={styles.emptyText}>Настройки скоро будут</Text>
         </View>
       )}
 
@@ -873,21 +969,11 @@ export default function DeviceDetailScreen({
           <TouchableOpacity
             style={styles.tabItem}
             activeOpacity={0.7}
-            onPress={() => setActiveTab('people')}
-          >
-            <Text style={styles.tabIcon}>👥</Text>
-            <Text style={[styles.tabLabel, activeTab === 'people' && styles.tabLabelActive]}>
-              People
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.tabItem}
-            activeOpacity={0.7}
             onPress={() => setActiveTab('chat')}
           >
             <Text style={styles.tabIcon}>💬</Text>
             <Text style={[styles.tabLabel, activeTab === 'chat' && styles.tabLabelActive]}>
-              Chat
+              Чаты
             </Text>
           </TouchableOpacity>
           <TouchableOpacity
@@ -897,7 +983,7 @@ export default function DeviceDetailScreen({
           >
             <Text style={styles.tabIcon}>🗺️</Text>
             <Text style={[styles.tabLabel, activeTab === 'map' && styles.tabLabelActive]}>
-              Map
+              Карта
             </Text>
           </TouchableOpacity>
           <TouchableOpacity
@@ -907,7 +993,7 @@ export default function DeviceDetailScreen({
           >
             <Text style={styles.tabIcon}>⚙️</Text>
             <Text style={[styles.tabLabel, activeTab === 'settings' && styles.tabLabelActive]}>
-              More
+              Ещё
             </Text>
           </TouchableOpacity>
         </View>
@@ -1199,6 +1285,28 @@ const styles = StyleSheet.create({
   lockIcon: {
     fontSize: 16,
     marginLeft: 8,
+  },
+  unreadBadge: {
+    minWidth: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#2AABEE',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 6,
+    marginLeft: 8,
+  },
+  unreadBadgeText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  chatListNameUnread: {
+    fontWeight: '600',
+  },
+  chatListPreviewUnread: {
+    color: '#000000',
+    fontWeight: '500',
   },
   emptyState: {
     flex: 1,

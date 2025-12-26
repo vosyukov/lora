@@ -17,4 +17,5 @@ export const MAX_EMPTY_READS = 5;
 export const FRIENDS_STORAGE_KEY = '@friends_ids';
 export const MESSAGES_STORAGE_KEY = '@messages';
 export const LAST_DEVICE_KEY = '@last_device';
+export const LAST_READ_STORAGE_KEY = '@last_read';
 export const MAX_STORED_MESSAGES = 500;
