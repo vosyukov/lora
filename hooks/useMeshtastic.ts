@@ -31,6 +31,7 @@ export interface UseMeshtasticResult {
   disconnect: () => void;
   sendMessage: (to: number, text: string) => Promise<Message | null>;
   sendChannelMessage: (text: string, channelIndex: number) => Promise<Message | null>;
+  sendLocationMessage: (latitude: number, longitude: number, destination: number | 'broadcast', channelIndex?: number) => Promise<Message | null>;
 
   // Helpers
   getNodeName: (node: NodeInfo) => string;
@@ -147,6 +148,15 @@ export function useMeshtastic(
     return meshtasticService.sendText(text, 'broadcast', channelIndex);
   }, []);
 
+  const sendLocationMessage = useCallback(async (
+    latitude: number,
+    longitude: number,
+    destination: number | 'broadcast',
+    channelIndex: number = 0
+  ): Promise<Message | null> => {
+    return meshtasticService.sendLocationMessage(latitude, longitude, destination, channelIndex);
+  }, []);
+
   const getNodeName = useCallback((node: NodeInfo): string => {
     return node.user?.longName || node.longName || node.shortName || `Node ${node.nodeNum.toString(16).toUpperCase()}`;
   }, []);
@@ -168,6 +178,7 @@ export function useMeshtastic(
     disconnect,
     sendMessage,
     sendChannelMessage,
+    sendLocationMessage,
     getNodeName,
     isMyNode,
   };

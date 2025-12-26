@@ -3,7 +3,7 @@ import { SimpleEventDispatcher } from 'ste-simple-events';
 import type * as Protobuf from '@meshtastic/protobufs';
 
 import { DeviceStatusEnum, ChannelRole } from '../types';
-import type { NodeInfo, Message, PacketMetadata, Channel, DeviceConfig, DeviceMetadata, MyNodeInfoExtended } from '../types';
+import type { NodeInfo, Message, PacketMetadata, Channel, DeviceConfig, DeviceMetadata, MyNodeInfoExtended, LocationData } from '../types';
 import {
   MESHTASTIC_SERVICE_UUID,
   TORADIO_UUID,
@@ -500,6 +500,103 @@ class MeshtasticService {
       const error = err instanceof Error ? err : new Error('Failed to send position');
       this.onError.dispatch(error);
       return false;
+    }
+  }
+
+  /**
+   * Send location as a message to a specific destination (DM or channel)
+   * @param latitude - Latitude in degrees
+   * @param longitude - Longitude in degrees
+   * @param destination - Target node number or 'broadcast' for channel
+   * @param channel - Channel index (default 0)
+   * @param altitude - Altitude in meters (optional)
+   */
+  async sendLocationMessage(
+    latitude: number,
+    longitude: number,
+    destination: number | 'broadcast' = 'broadcast',
+    channel: number = 0,
+    altitude?: number
+  ): Promise<Message | null> {
+    if (!this.device || !this._myNodeNum) {
+      return null;
+    }
+
+    const to = destination === 'broadcast' ? BROADCAST_ADDR : destination;
+
+    try {
+      const { create, toBinary } = await import('@bufbuild/protobuf');
+      const { Mesh, Portnums } = await import('@meshtastic/protobufs');
+
+      // Create Position protobuf
+      const position = create(Mesh.PositionSchema, {
+        latitudeI: Math.round(latitude * 1e7),
+        longitudeI: Math.round(longitude * 1e7),
+        altitude: altitude ? Math.round(altitude) : 0,
+        time: Math.floor(Date.now() / 1000),
+      });
+
+      const positionPayload = toBinary(Mesh.PositionSchema, position);
+
+      // Create Data payload with POSITION_APP portnum
+      const dataPayload = create(Mesh.DataSchema, {
+        portnum: Portnums.PortNum.POSITION_APP,
+        payload: positionPayload,
+      });
+
+      const packetId = Math.floor(Math.random() * 0xFFFFFFFF);
+      const meshPacket = create(Mesh.MeshPacketSchema, {
+        to,
+        from: this._myNodeNum,
+        id: packetId,
+        channel,
+        wantAck: destination !== 'broadcast',
+        payloadVariant: {
+          case: 'decoded',
+          value: dataPayload,
+        },
+      });
+
+      const toRadio = create(Mesh.ToRadioSchema, {
+        payloadVariant: {
+          case: 'packet',
+          value: meshPacket,
+        },
+      });
+
+      const payload = toBinary(Mesh.ToRadioSchema, toRadio);
+      const base64Payload = btoa(String.fromCharCode.apply(null, Array.from(payload)));
+
+      await this.device.writeCharacteristicWithResponseForService(
+        MESHTASTIC_SERVICE_UUID,
+        TORADIO_UUID,
+        base64Payload
+      );
+
+      const message: Message = {
+        id: `${this._myNodeNum}-${Date.now()}`,
+        packetId,
+        from: this._myNodeNum,
+        to,
+        text: '📍 Геолокация',
+        timestamp: Date.now(),
+        isOutgoing: true,
+        channel,
+        status: 'sent',
+        type: 'location',
+        location: {
+          latitude,
+          longitude,
+          altitude,
+          time: Math.floor(Date.now() / 1000),
+        },
+      };
+
+      return message;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error('Failed to send location');
+      this.onError.dispatch(error);
+      return null;
     }
   }
 
@@ -1395,6 +1492,37 @@ class MeshtasticService {
 
         const position = fromBinary(Mesh.PositionSchema, payloadBytes);
         this.onPositionPacket.dispatch({ ...metadata, data: position } as PacketMetadata<Protobuf.Mesh.Position>);
+
+        // If position is sent to us (DM) or broadcast (channel), create a location message
+        // Skip our own position updates
+        if (meshPacket.from !== this._myNodeNum) {
+          const isForMe = this._myNodeNum === null || meshPacket.to === this._myNodeNum;
+          const isBroadcast = meshPacket.to === BROADCAST_ADDR;
+
+          if (isForMe || isBroadcast) {
+            const positionData = position as { latitudeI?: number; longitudeI?: number; altitude?: number; time?: number };
+            // Only create message if we have valid coordinates
+            if (positionData.latitudeI && positionData.longitudeI) {
+              const locationMessage: Message = {
+                id: `${meshPacket.from}-${meshPacket.id}`,
+                from: meshPacket.from,
+                to: meshPacket.to,
+                text: '📍 Геолокация',
+                timestamp: Date.now(),
+                isOutgoing: false,
+                channel: meshPacket.channel,
+                type: 'location',
+                location: {
+                  latitude: positionData.latitudeI / 1e7,
+                  longitude: positionData.longitudeI / 1e7,
+                  altitude: positionData.altitude,
+                  time: positionData.time,
+                },
+              };
+              this.onMessagePacket.dispatch(locationMessage);
+            }
+          }
+        }
         break;
       }
 

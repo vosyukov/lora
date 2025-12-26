@@ -38,6 +38,14 @@ export interface NodeInfo {
 }
 
 export type MessageStatus = 'pending' | 'sent' | 'delivered' | 'failed';
+export type MessageType = 'text' | 'location';
+
+export interface LocationData {
+  latitude: number;
+  longitude: number;
+  altitude?: number;
+  time?: number;
+}
 
 export interface Message {
   id: string;
@@ -49,6 +57,8 @@ export interface Message {
   isOutgoing: boolean;
   channel?: number;
   status?: MessageStatus;   // Only for outgoing messages
+  type?: MessageType;       // Message type (text or location)
+  location?: LocationData;  // Location data for location messages
 }
 
 export type ActiveTab = 'chat' | 'map' | 'node' | 'settings';

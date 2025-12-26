@@ -83,6 +83,7 @@ export default function DeviceDetailScreen({
     disconnect,
     sendMessage,
     sendChannelMessage,
+    sendLocationMessage,
     getNodeName,
     isMyNode,
   } = useMeshtastic(device, handleIncomingMessage, handleAck);
@@ -120,6 +121,7 @@ export default function DeviceDetailScreen({
   const mapRef = useRef<MapLibreGL.MapViewRef>(null);
   const cameraRef = useRef<MapLibreGL.CameraRef>(null);
   const [mapCameraSet, setMapCameraSet] = useState(false);
+  const [targetMapLocation, setTargetMapLocation] = useState<{ latitude: number; longitude: number; senderName?: string } | null>(null);
 
   // Filter friends and nearby (excluding self)
   const friends = useMemo(() =>
@@ -273,6 +275,41 @@ export default function DeviceDetailScreen({
       }, 100);
     } else {
       Alert.alert('Ошибка', 'Не удалось отправить сообщение');
+    }
+  };
+
+  const handleSendLocation = async () => {
+    if (!openChat) return;
+
+    if (!currentLocation) {
+      Alert.alert('Ошибка', 'Геолокация недоступна. Включите GPS в настройках.');
+      return;
+    }
+
+    let sentMessage: Message | null;
+
+    if (openChat.type === 'dm') {
+      sentMessage = await sendLocationMessage(
+        currentLocation.latitude,
+        currentLocation.longitude,
+        openChat.id
+      );
+    } else {
+      sentMessage = await sendLocationMessage(
+        currentLocation.latitude,
+        currentLocation.longitude,
+        'broadcast',
+        openChat.id
+      );
+    }
+
+    if (sentMessage) {
+      addMessage(sentMessage);
+      setTimeout(() => {
+        scrollViewRef.current?.scrollToEnd({ animated: true });
+      }, 100);
+    } else {
+      Alert.alert('Ошибка', 'Не удалось отправить геолокацию');
     }
   };
 
@@ -711,6 +748,57 @@ export default function DeviceDetailScreen({
                 }
               };
 
+              // Handle location messages
+              if (msg.type === 'location' && msg.location) {
+                const { latitude, longitude, altitude } = msg.location;
+                const locationSenderName = msg.isOutgoing ? 'Вы' : senderName;
+                return (
+                  <View key={msg.id}>
+                    {isChannel && !msg.isOutgoing && (
+                      <Text style={styles.channelSenderName}>{senderName}</Text>
+                    )}
+                    <TouchableOpacity
+                      style={[
+                        styles.messageBubble,
+                        styles.locationBubble,
+                        msg.isOutgoing ? styles.outgoingBubble : styles.incomingBubble,
+                      ]}
+                      onPress={() => navigateToLocation(latitude, longitude, locationSenderName)}
+                      activeOpacity={0.7}
+                    >
+                      <View style={styles.locationContent}>
+                        <Text style={styles.locationIcon}>📍</Text>
+                        <View style={styles.locationInfo}>
+                          <Text style={[
+                            styles.locationTitle,
+                            msg.isOutgoing ? styles.outgoingText : styles.incomingText,
+                          ]}>
+                            Геолокация
+                          </Text>
+                          <Text style={[
+                            styles.locationCoords,
+                            msg.isOutgoing ? styles.outgoingCoords : styles.incomingCoords,
+                          ]}>
+                            {latitude.toFixed(6)}, {longitude.toFixed(6)}
+                            {altitude ? ` • ${altitude}м` : ''}
+                          </Text>
+                          <Text style={styles.locationHint}>Показать на карте</Text>
+                        </View>
+                      </View>
+                      <View style={styles.messageFooter}>
+                        <Text style={[
+                          styles.messageTime,
+                          msg.isOutgoing ? styles.outgoingTime : styles.incomingTime,
+                        ]}>
+                          {formatTime(msg.timestamp)}
+                        </Text>
+                        {getStatusIcon()}
+                      </View>
+                    </TouchableOpacity>
+                  </View>
+                );
+              }
+
               return (
                 <View key={msg.id}>
                   {/* Show sender name for channel messages (not outgoing) */}
@@ -746,9 +834,16 @@ export default function DeviceDetailScreen({
         </ScrollView>
 
         <View style={styles.inputContainer}>
+          <TouchableOpacity
+            style={styles.locationButton}
+            onPress={handleSendLocation}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.locationButtonText}>📍</Text>
+          </TouchableOpacity>
           <TextInput
             style={styles.textInput}
-            placeholder="Message..."
+            placeholder="Сообщение..."
             placeholderTextColor="#8E8E93"
             value={messageText}
             onChangeText={setMessageText}
@@ -822,10 +917,28 @@ export default function DeviceDetailScreen({
               {myNodeNum ? `!${myNodeNum.toString(16)}` : '—'}
             </Text>
           </View>
-          {myNode?.hwModel && (
+          {(myNode?.hwModel || deviceMetadata.hwModel) && (
             <View style={styles.nodeStatusRow}>
               <Text style={styles.nodeStatusLabel}>Модель</Text>
-              <Text style={styles.nodeStatusValue}>{myNode.hwModel}</Text>
+              <Text style={styles.nodeStatusValue}>{myNode?.hwModel || deviceMetadata.hwModel}</Text>
+            </View>
+          )}
+          {deviceMetadata.firmwareVersion && (
+            <View style={styles.nodeStatusRow}>
+              <Text style={styles.nodeStatusLabel}>Прошивка</Text>
+              <Text style={styles.nodeStatusValue}>{deviceMetadata.firmwareVersion}</Text>
+            </View>
+          )}
+          {deviceConfig.role && (
+            <View style={styles.nodeStatusRow}>
+              <Text style={styles.nodeStatusLabel}>Роль</Text>
+              <Text style={styles.nodeStatusValue}>{deviceConfig.role}</Text>
+            </View>
+          )}
+          {myNodeInfo?.rebootCount !== undefined && (
+            <View style={styles.nodeStatusRow}>
+              <Text style={styles.nodeStatusLabel}>Перезагрузок</Text>
+              <Text style={styles.nodeStatusValue}>{myNodeInfo.rebootCount}</Text>
             </View>
           )}
         </View>
@@ -855,9 +968,33 @@ export default function DeviceDetailScreen({
           </View>
         </View>
 
-        {/* Radio Stats */}
-        <Text style={styles.sectionHeader}>РАДИО</Text>
+        {/* LoRa Config */}
+        <Text style={styles.sectionHeader}>LORA</Text>
         <View style={styles.nodeStatusCard}>
+          {deviceConfig.region && (
+            <View style={styles.nodeStatusRow}>
+              <Text style={styles.nodeStatusLabel}>Регион</Text>
+              <Text style={styles.nodeStatusValue}>{deviceConfig.region}</Text>
+            </View>
+          )}
+          {deviceConfig.modemPreset && (
+            <View style={styles.nodeStatusRow}>
+              <Text style={styles.nodeStatusLabel}>Пресет</Text>
+              <Text style={styles.nodeStatusValue}>{deviceConfig.modemPreset}</Text>
+            </View>
+          )}
+          {deviceConfig.txPower !== undefined && (
+            <View style={styles.nodeStatusRow}>
+              <Text style={styles.nodeStatusLabel}>Мощность TX</Text>
+              <Text style={styles.nodeStatusValue}>{deviceConfig.txPower} dBm</Text>
+            </View>
+          )}
+          {deviceConfig.hopLimit !== undefined && (
+            <View style={styles.nodeStatusRow}>
+              <Text style={styles.nodeStatusLabel}>Лимит хопов</Text>
+              <Text style={styles.nodeStatusValue}>{deviceConfig.hopLimit}</Text>
+            </View>
+          )}
           <View style={styles.nodeStatusRow}>
             <Text style={styles.nodeStatusLabel}>Загрузка канала</Text>
             <Text style={styles.nodeStatusValue}>
@@ -874,10 +1011,205 @@ export default function DeviceDetailScreen({
                 : '—'}
             </Text>
           </View>
+          {deviceConfig.bandwidth !== undefined && deviceConfig.bandwidth > 0 && (
+            <View style={styles.nodeStatusRow}>
+              <Text style={styles.nodeStatusLabel}>Ширина канала</Text>
+              <Text style={styles.nodeStatusValue}>{deviceConfig.bandwidth} kHz</Text>
+            </View>
+          )}
+          {deviceConfig.spreadFactor !== undefined && deviceConfig.spreadFactor > 0 && (
+            <View style={styles.nodeStatusRow}>
+              <Text style={styles.nodeStatusLabel}>Spread Factor</Text>
+              <Text style={styles.nodeStatusValue}>SF{deviceConfig.spreadFactor}</Text>
+            </View>
+          )}
+          {deviceConfig.codingRate !== undefined && deviceConfig.codingRate > 0 && (
+            <View style={styles.nodeStatusRow}>
+              <Text style={styles.nodeStatusLabel}>Coding Rate</Text>
+              <Text style={styles.nodeStatusValue}>4/{deviceConfig.codingRate + 4}</Text>
+            </View>
+          )}
         </View>
 
-        {/* Network Stats */}
-        <Text style={styles.sectionHeader}>СЕТЬ</Text>
+        {/* Position Config */}
+        {(deviceConfig.positionBroadcastSecs !== undefined || deviceConfig.gpsUpdateInterval !== undefined) && (
+          <>
+            <Text style={styles.sectionHeader}>ПОЗИЦИЯ</Text>
+            <View style={styles.nodeStatusCard}>
+              {deviceConfig.positionBroadcastSecs !== undefined && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>Интервал передачи</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceConfig.positionBroadcastSecs} сек</Text>
+                </View>
+              )}
+              {deviceConfig.positionBroadcastSmartEnabled !== undefined && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>Умная передача</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceConfig.positionBroadcastSmartEnabled ? 'Вкл' : 'Выкл'}</Text>
+                </View>
+              )}
+              {deviceConfig.gpsUpdateInterval !== undefined && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>Обновление GPS</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceConfig.gpsUpdateInterval} сек</Text>
+                </View>
+              )}
+              {deviceConfig.fixedPosition !== undefined && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>Фикс. позиция</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceConfig.fixedPosition ? 'Да' : 'Нет'}</Text>
+                </View>
+              )}
+            </View>
+          </>
+        )}
+
+        {/* Power Config */}
+        {(deviceConfig.isPowerSaving !== undefined || deviceConfig.sdsSecs !== undefined) && (
+          <>
+            <Text style={styles.sectionHeader}>ПИТАНИЕ</Text>
+            <View style={styles.nodeStatusCard}>
+              {deviceConfig.isPowerSaving !== undefined && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>Энергосбережение</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceConfig.isPowerSaving ? 'Вкл' : 'Выкл'}</Text>
+                </View>
+              )}
+              {deviceConfig.onBatteryShutdownAfterSecs !== undefined && deviceConfig.onBatteryShutdownAfterSecs > 0 && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>Авто-выкл. (бат.)</Text>
+                  <Text style={styles.nodeStatusValue}>{Math.round(deviceConfig.onBatteryShutdownAfterSecs / 60)} мин</Text>
+                </View>
+              )}
+              {deviceConfig.waitBluetoothSecs !== undefined && deviceConfig.waitBluetoothSecs > 0 && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>Ожидание BT</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceConfig.waitBluetoothSecs} сек</Text>
+                </View>
+              )}
+              {deviceConfig.sdsSecs !== undefined && deviceConfig.sdsSecs > 0 && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>Глубокий сон</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceConfig.sdsSecs} сек</Text>
+                </View>
+              )}
+              {deviceConfig.lsSecs !== undefined && deviceConfig.lsSecs > 0 && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>Лёгкий сон</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceConfig.lsSecs} сек</Text>
+                </View>
+              )}
+            </View>
+          </>
+        )}
+
+        {/* Display Config */}
+        {(deviceConfig.screenOnSecs !== undefined || deviceConfig.units !== undefined) && (
+          <>
+            <Text style={styles.sectionHeader}>ДИСПЛЕЙ</Text>
+            <View style={styles.nodeStatusCard}>
+              {deviceConfig.screenOnSecs !== undefined && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>Экран активен</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceConfig.screenOnSecs} сек</Text>
+                </View>
+              )}
+              {deviceConfig.units && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>Единицы</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceConfig.units === 'METRIC' ? 'Метрические' : 'Имперские'}</Text>
+                </View>
+              )}
+              {deviceConfig.gpsFormat && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>Формат GPS</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceConfig.gpsFormat}</Text>
+                </View>
+              )}
+              {deviceConfig.compassNorthTop !== undefined && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>Север сверху</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceConfig.compassNorthTop ? 'Да' : 'Нет'}</Text>
+                </View>
+              )}
+              {deviceConfig.oled && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>Тип OLED</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceConfig.oled}</Text>
+                </View>
+              )}
+            </View>
+          </>
+        )}
+
+        {/* Bluetooth Config */}
+        {(deviceConfig.enabled !== undefined || deviceConfig.mode !== undefined || deviceMetadata.hasBluetooth !== undefined) && (
+          <>
+            <Text style={styles.sectionHeader}>BLUETOOTH</Text>
+            <View style={styles.nodeStatusCard}>
+              {deviceConfig.enabled !== undefined && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>Включен</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceConfig.enabled ? 'Да' : 'Нет'}</Text>
+                </View>
+              )}
+              {deviceConfig.mode && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>Режим PIN</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceConfig.mode}</Text>
+                </View>
+              )}
+              {deviceConfig.fixedPin !== undefined && deviceConfig.fixedPin > 0 && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>PIN</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceConfig.fixedPin}</Text>
+                </View>
+              )}
+            </View>
+          </>
+        )}
+
+        {/* Network */}
+        {(deviceConfig.wifiEnabled !== undefined || deviceMetadata.hasWifi) && (
+          <>
+            <Text style={styles.sectionHeader}>СЕТЬ</Text>
+            <View style={styles.nodeStatusCard}>
+              {deviceMetadata.hasWifi !== undefined && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>WiFi модуль</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceMetadata.hasWifi ? 'Есть' : 'Нет'}</Text>
+                </View>
+              )}
+              {deviceConfig.wifiEnabled !== undefined && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>WiFi включен</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceConfig.wifiEnabled ? 'Да' : 'Нет'}</Text>
+                </View>
+              )}
+              {deviceConfig.wifiSsid && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>WiFi SSID</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceConfig.wifiSsid}</Text>
+                </View>
+              )}
+              {deviceMetadata.hasEthernet !== undefined && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>Ethernet</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceMetadata.hasEthernet ? 'Есть' : 'Нет'}</Text>
+                </View>
+              )}
+              {deviceConfig.ntpServer && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>NTP сервер</Text>
+                  <Text style={styles.nodeStatusValue}>{deviceConfig.ntpServer}</Text>
+                </View>
+              )}
+            </View>
+          </>
+        )}
+
+        {/* Mesh Stats */}
+        <Text style={styles.sectionHeader}>MESH СЕТЬ</Text>
         <View style={styles.nodeStatusCard}>
           <View style={styles.nodeStatusRow}>
             <Text style={styles.nodeStatusLabel}>Ноды в сети</Text>
@@ -891,6 +1223,24 @@ export default function DeviceDetailScreen({
             <Text style={styles.nodeStatusLabel}>Друзья</Text>
             <Text style={styles.nodeStatusValue}>{friendIds.size}</Text>
           </View>
+          {myNodeInfo?.maxChannels !== undefined && (
+            <View style={styles.nodeStatusRow}>
+              <Text style={styles.nodeStatusLabel}>Макс. каналов</Text>
+              <Text style={styles.nodeStatusValue}>{myNodeInfo.maxChannels}</Text>
+            </View>
+          )}
+          {deviceConfig.nodeInfoBroadcastSecs !== undefined && (
+            <View style={styles.nodeStatusRow}>
+              <Text style={styles.nodeStatusLabel}>Анонс ноды</Text>
+              <Text style={styles.nodeStatusValue}>{deviceConfig.nodeInfoBroadcastSecs} сек</Text>
+            </View>
+          )}
+          {deviceConfig.rebroadcastMode && (
+            <View style={styles.nodeStatusRow}>
+              <Text style={styles.nodeStatusLabel}>Ретрансляция</Text>
+              <Text style={styles.nodeStatusValue}>{deviceConfig.rebroadcastMode}</Text>
+            </View>
+          )}
         </View>
 
         <View style={styles.bottomPadding} />
@@ -1100,6 +1450,31 @@ export default function DeviceDetailScreen({
     cameraRef.current.fitBounds(ne, sw, 50, 500);
   };
 
+  // Navigate to a specific location on the map
+  const navigateToLocation = (latitude: number, longitude: number, senderName?: string) => {
+    setTargetMapLocation({ latitude, longitude, senderName });
+    setOpenChat(null); // Close the chat
+    setActiveTab('map'); // Switch to map tab
+  };
+
+  // Effect to center map on target location when it changes
+  useEffect(() => {
+    if (targetMapLocation && cameraRef.current && activeTab === 'map') {
+      // Small delay to ensure map is rendered
+      const timer = setTimeout(() => {
+        cameraRef.current?.setCamera({
+          centerCoordinate: [targetMapLocation.longitude, targetMapLocation.latitude],
+          zoomLevel: 15,
+          animationDuration: 500,
+          animationMode: 'flyTo',
+        });
+        // Clear target after navigating
+        setTargetMapLocation(null);
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [targetMapLocation, activeTab]);
+
   const renderMapTab = () => {
     const hasAnyPosition = nodesWithPosition.length > 0 || currentLocation;
 
@@ -1174,6 +1549,26 @@ export default function DeviceDetailScreen({
               </MapLibreGL.PointAnnotation>
             );
           })}
+
+          {/* Shared location marker */}
+          {targetMapLocation && (
+            <MapLibreGL.PointAnnotation
+              id="shared-location"
+              coordinate={[targetMapLocation.longitude, targetMapLocation.latitude]}
+              title={targetMapLocation.senderName || 'Локация'}
+            >
+              <View style={styles.sharedLocationMarker}>
+                <Text style={styles.sharedLocationIcon}>📍</Text>
+                {targetMapLocation.senderName && (
+                  <View style={styles.sharedLocationLabel}>
+                    <Text style={styles.sharedLocationName} numberOfLines={1}>
+                      {targetMapLocation.senderName}
+                    </Text>
+                  </View>
+                )}
+              </View>
+            </MapLibreGL.PointAnnotation>
+          )}
         </MapLibreGL.MapView>
 
         {/* Map controls */}
@@ -1916,6 +2311,54 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: '600',
   },
+  // Location Button
+  locationButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#F4F4F5',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 8,
+  },
+  locationButtonText: {
+    fontSize: 20,
+  },
+  // Location Message
+  locationBubble: {
+    minWidth: 200,
+  },
+  locationContent: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  locationIcon: {
+    fontSize: 28,
+    marginRight: 10,
+  },
+  locationInfo: {
+    flex: 1,
+  },
+  locationTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  locationCoords: {
+    fontSize: 13,
+    marginBottom: 4,
+  },
+  incomingCoords: {
+    color: '#666666',
+  },
+  outgoingCoords: {
+    color: 'rgba(255,255,255,0.85)',
+  },
+  locationHint: {
+    fontSize: 11,
+    color: '#8E8E93',
+    fontStyle: 'italic',
+  },
   // Create Group Button
   createGroupButton: {
     paddingHorizontal: 12,
@@ -2274,6 +2717,34 @@ const styles = StyleSheet.create({
     backgroundColor: '#2AABEE',
     borderWidth: 3,
     borderColor: '#FFFFFF',
+  },
+  sharedLocationMarker: {
+    alignItems: 'center',
+  },
+  sharedLocationIcon: {
+    fontSize: 36,
+    textShadowColor: 'rgba(0, 0, 0, 0.3)',
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 4,
+  },
+  sharedLocationLabel: {
+    backgroundColor: 'rgba(42, 171, 238, 0.95)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginTop: -4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
+    elevation: 4,
+    maxWidth: 120,
+  },
+  sharedLocationName: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '600',
+    textAlign: 'center',
   },
   // Offline controls
   mapControls: {
