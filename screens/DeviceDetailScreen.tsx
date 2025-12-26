@@ -10,13 +10,16 @@ import {
   Alert,
   TextInput,
   KeyboardAvoidingView,
+  Modal,
+  Share,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Device } from 'react-native-ble-plx';
+import QRCode from 'react-native-qrcode-svg';
 
 import { meshtasticService } from '../services/MeshtasticService';
-import type { NodeInfo, Message, ActiveTab } from '../types';
-import { DeviceStatusEnum } from '../types';
+import type { NodeInfo, Message, ActiveTab, Channel, ChatTarget } from '../types';
+import { DeviceStatusEnum, ChannelRole } from '../types';
 import {
   FRIENDS_STORAGE_KEY,
   MESSAGES_STORAGE_KEY,
@@ -41,8 +44,14 @@ export default function DeviceDetailScreen({
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<ActiveTab>('people');
   const [messages, setMessages] = useState<Message[]>([]);
-  const [openChatWith, setOpenChatWith] = useState<number | null>(null);
+  const [channels, setChannels] = useState<Channel[]>([]);
+  const [openChat, setOpenChat] = useState<ChatTarget | null>(null);
   const [messageText, setMessageText] = useState('');
+  const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [newGroupName, setNewGroupName] = useState('');
+  const [newGroupEncryption, setNewGroupEncryption] = useState<'none' | 'aes128' | 'aes256'>('aes256');
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [shareChannelUrl, setShareChannelUrl] = useState<string | null>(null);
 
   const scrollViewRef = useRef<ScrollView>(null);
 
@@ -57,22 +66,41 @@ export default function DeviceDetailScreen({
     [nodes, friendIds, myNodeNum]
   );
 
+  // Active channels (not disabled)
+  const activeChannels = useMemo(() =>
+    channels.filter(ch => ch.role !== ChannelRole.DISABLED),
+    [channels]
+  );
+
   // Messages for current chat
   const chatMessages = useMemo(() => {
-    if (!openChatWith) return [];
-    return messages
-      .filter(m =>
-        (m.from === openChatWith && m.to === myNodeNum) ||
-        (m.from === myNodeNum && m.to === openChatWith)
-      )
-      .sort((a, b) => a.timestamp - b.timestamp);
-  }, [messages, openChatWith, myNodeNum]);
+    if (!openChat) return [];
 
-  // Chat list (unique conversations)
+    if (openChat.type === 'dm') {
+      // DM: filter by sender/receiver
+      return messages
+        .filter(m =>
+          (m.from === openChat.id && m.to === myNodeNum) ||
+          (m.from === myNodeNum && m.to === openChat.id)
+        )
+        .sort((a, b) => a.timestamp - b.timestamp);
+    } else {
+      // Channel: filter by channel index (broadcast messages on this channel)
+      return messages
+        .filter(m => m.channel === openChat.id)
+        .sort((a, b) => a.timestamp - b.timestamp);
+    }
+  }, [messages, openChat, myNodeNum]);
+
+  // Chat list (unique DM conversations, excluding channel messages)
   const chatList = useMemo(() => {
     const chats = new Map<number, { nodeNum: number; lastMessage: Message }>();
+    const BROADCAST_ADDR = 0xFFFFFFFF;
 
     messages.forEach(msg => {
+      // Skip channel messages (broadcast)
+      if (msg.to === BROADCAST_ADDR) return;
+
       const otherNode = msg.isOutgoing ? msg.to : msg.from;
       if (otherNode === myNodeNum) return;
 
@@ -114,6 +142,18 @@ export default function DeviceDetailScreen({
       });
     });
 
+    const unsubChannel = meshtasticService.onChannelPacket.subscribe((channel) => {
+      setChannels(prev => {
+        const existing = prev.findIndex(ch => ch.index === channel.index);
+        if (existing !== -1) {
+          const updated = [...prev];
+          updated[existing] = channel;
+          return updated;
+        }
+        return [...prev, channel];
+      });
+    });
+
     const unsubMessage = meshtasticService.onMessagePacket.subscribe((msg) => {
       setMessages(prev => {
         // Check for duplicates
@@ -127,16 +167,37 @@ export default function DeviceDetailScreen({
         // Show notification if chat is not open
         const senderNode = meshtasticService.getNode(msg.from);
         const senderName = senderNode?.longName || senderNode?.shortName || 'Someone';
+        const BROADCAST_ADDR = 0xFFFFFFFF;
+        const isChannelMessage = msg.to === BROADCAST_ADDR;
 
-        if (openChatWith !== msg.from) {
-          Alert.alert(
-            senderName,
-            msg.text.length > 50 ? msg.text.substring(0, 50) + '...' : msg.text,
-            [
-              { text: 'Close', style: 'cancel' },
-              { text: 'Open', onPress: () => openChat(msg.from) },
-            ]
-          );
+        // Check if this chat is already open
+        const isChatOpen = openChat && (
+          (openChat.type === 'dm' && openChat.id === msg.from) ||
+          (openChat.type === 'channel' && openChat.id === msg.channel)
+        );
+
+        if (!isChatOpen) {
+          if (isChannelMessage) {
+            const channel = meshtasticService.getChannel(msg.channel ?? 0);
+            const channelName = channel?.name || `Channel ${msg.channel ?? 0}`;
+            Alert.alert(
+              `#${channelName}`,
+              `${senderName}: ${msg.text.length > 40 ? msg.text.substring(0, 40) + '...' : msg.text}`,
+              [
+                { text: 'Close', style: 'cancel' },
+                { text: 'Open', onPress: () => openChatHandler({ type: 'channel', id: msg.channel ?? 0 }) },
+              ]
+            );
+          } else {
+            Alert.alert(
+              senderName,
+              msg.text.length > 50 ? msg.text.substring(0, 50) + '...' : msg.text,
+              [
+                { text: 'Close', style: 'cancel' },
+                { text: 'Open', onPress: () => openChatHandler({ type: 'dm', id: msg.from }) },
+              ]
+            );
+          }
         }
 
         return updated;
@@ -155,6 +216,7 @@ export default function DeviceDetailScreen({
       unsubStatus();
       unsubMyInfo();
       unsubNodeInfo();
+      unsubChannel();
       unsubMessage();
       unsubError();
       meshtasticService.disconnect();
@@ -221,6 +283,128 @@ export default function DeviceDetailScreen({
     }
   };
 
+  const handleSendMessage = async () => {
+    if (!openChat || !messageText.trim()) return;
+
+    let sentMessage;
+
+    if (openChat.type === 'dm') {
+      // Direct message
+      sentMessage = await meshtasticService.sendMessage(openChat.id, messageText);
+    } else {
+      // Channel message (broadcast on channel)
+      sentMessage = await meshtasticService.sendText(messageText, 'broadcast', openChat.id);
+    }
+
+    if (sentMessage) {
+      setMessages(prev => {
+        const updated = [...prev, sentMessage!];
+        saveMessages(updated);
+        return updated;
+      });
+      setMessageText('');
+
+      setTimeout(() => {
+        scrollViewRef.current?.scrollToEnd({ animated: true });
+      }, 100);
+    } else {
+      Alert.alert('Error', 'Failed to send message');
+    }
+  };
+
+  const handleCreateGroup = async () => {
+    if (!newGroupName.trim()) {
+      Alert.alert('Error', 'Please enter a group name');
+      return;
+    }
+
+    // Find first available channel slot (1-7, as 0 is PRIMARY)
+    const usedIndices = new Set(channels.map(ch => ch.index));
+    let availableIndex = -1;
+    for (let i = 1; i <= 7; i++) {
+      const existingChannel = channels.find(ch => ch.index === i);
+      if (!existingChannel || existingChannel.role === ChannelRole.DISABLED) {
+        availableIndex = i;
+        break;
+      }
+    }
+
+    if (availableIndex === -1) {
+      Alert.alert('Error', 'All channel slots are in use (max 7 groups)');
+      return;
+    }
+
+    // Generate PSK based on encryption selection
+    let psk: Uint8Array;
+    if (newGroupEncryption === 'none') {
+      psk = new Uint8Array();
+    } else if (newGroupEncryption === 'aes128') {
+      psk = meshtasticService.generatePsk(16);
+    } else {
+      psk = meshtasticService.generatePsk(32);
+    }
+
+    const success = await meshtasticService.setChannel(
+      availableIndex,
+      newGroupName.trim(),
+      psk,
+      ChannelRole.SECONDARY
+    );
+
+    if (success) {
+      setShowCreateGroup(false);
+      setNewGroupName('');
+      setNewGroupEncryption('aes256');
+      // Open the new channel chat
+      setOpenChat({ type: 'channel', id: availableIndex });
+    } else {
+      Alert.alert('Error', 'Failed to create group');
+    }
+  };
+
+  const handleDeleteChannel = (channel: Channel) => {
+    Alert.alert(
+      'Delete Group',
+      `Are you sure you want to delete "${channel.name}"?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            const success = await meshtasticService.deleteChannel(channel.index);
+            if (!success) {
+              Alert.alert('Error', 'Failed to delete group');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const handleShareChannel = async (channelIndex: number) => {
+    const url = await meshtasticService.getChannelUrl(channelIndex);
+    if (url) {
+      setShareChannelUrl(url);
+      setShowShareModal(true);
+    } else {
+      Alert.alert('Error', 'Failed to generate share link');
+    }
+  };
+
+  const handleShareLink = async () => {
+    if (!shareChannelUrl) return;
+
+    try {
+      await Share.share({
+        message: shareChannelUrl,
+        title: 'Join my Meshtastic channel',
+      });
+    } catch (error) {
+      // User cancelled or error
+    }
+  };
+
   const handleDisconnect = async () => {
     await meshtasticService.disconnect();
     onBack();
@@ -239,8 +423,8 @@ export default function DeviceDetailScreen({
     saveFriends(newIds);
   };
 
-  const openChat = (nodeNum: number) => {
-    setOpenChatWith(nodeNum);
+  const openChatHandler = (target: ChatTarget) => {
+    setOpenChat(target);
     setActiveTab('chat');
   };
 
@@ -253,12 +437,12 @@ export default function DeviceDetailScreen({
       isFriend ? 'What would you like to do?' : 'Add to friends?',
       isFriend
         ? [
-            { text: 'Message', onPress: () => openChat(node.nodeNum) },
+            { text: 'Message', onPress: () => openChatHandler({ type: 'dm', id: node.nodeNum }) },
             { text: 'Remove friend', style: 'destructive', onPress: () => removeFriend(node.nodeNum) },
             { text: 'Cancel', style: 'cancel' },
           ]
         : [
-            { text: 'Message', onPress: () => openChat(node.nodeNum) },
+            { text: 'Message', onPress: () => openChatHandler({ type: 'dm', id: node.nodeNum }) },
             { text: 'Add friend', onPress: () => addFriend(node.nodeNum) },
             { text: 'Cancel', style: 'cancel' },
           ]
@@ -374,8 +558,79 @@ export default function DeviceDetailScreen({
     </ScrollView>
   );
 
+  const renderChannelItem = (channel: Channel) => {
+    // Get last message for this channel
+    const channelMessages = messages.filter(m => m.channel === channel.index);
+    const lastMessage = channelMessages.length > 0
+      ? channelMessages[channelMessages.length - 1]
+      : null;
+
+    const canDelete = channel.role !== ChannelRole.PRIMARY;
+
+    return (
+      <TouchableOpacity
+        key={`channel-${channel.index}`}
+        style={styles.chatListItem}
+        onPress={() => setOpenChat({ type: 'channel', id: channel.index })}
+        onLongPress={canDelete ? () => handleDeleteChannel(channel) : undefined}
+        activeOpacity={0.7}
+      >
+        <View style={[styles.nodeAvatar, styles.channelAvatar]}>
+          <Text style={styles.nodeAvatarText}>#</Text>
+        </View>
+        <View style={styles.chatListInfo}>
+          <View style={styles.chatListHeader}>
+            <Text style={styles.chatListName}>
+              {channel.name}
+              {channel.role === ChannelRole.PRIMARY && ' (Primary)'}
+            </Text>
+            {lastMessage && (
+              <Text style={styles.chatListTime}>
+                {formatTime(lastMessage.timestamp)}
+              </Text>
+            )}
+          </View>
+          <Text style={styles.chatListPreview} numberOfLines={1}>
+            {lastMessage
+              ? (lastMessage.isOutgoing ? 'You: ' : '') + lastMessage.text
+              : channel.hasEncryption ? 'Encrypted channel' : 'Open channel'
+            }
+          </Text>
+        </View>
+        {channel.hasEncryption && (
+          <Text style={styles.lockIcon}>🔒</Text>
+        )}
+      </TouchableOpacity>
+    );
+  };
+
   const renderChatList = () => (
     <ScrollView style={styles.nodesList} showsVerticalScrollIndicator={false}>
+      {/* Groups (Channels) section */}
+      <View style={styles.sectionHeaderRow}>
+        <Text style={styles.sectionHeader}>
+          GROUPS {activeChannels.length > 0 ? `(${activeChannels.length})` : ''}
+        </Text>
+        <TouchableOpacity
+          style={styles.createGroupButton}
+          onPress={() => setShowCreateGroup(true)}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.createGroupButtonText}>+ Create</Text>
+        </TouchableOpacity>
+      </View>
+
+      {activeChannels.length > 0 ? (
+        activeChannels.map(channel => renderChannelItem(channel))
+      ) : (
+        <View style={styles.emptyGroupsHint}>
+          <Text style={styles.emptyGroupsText}>
+            Create a group to chat with multiple people at once
+          </Text>
+        </View>
+      )}
+
+      {/* DM Messages section */}
       <Text style={styles.sectionHeader}>MESSAGES</Text>
 
       {chatList.length > 0 ? (
@@ -385,7 +640,7 @@ export default function DeviceDetailScreen({
             <TouchableOpacity
               key={chat.nodeNum}
               style={styles.chatListItem}
-              onPress={() => setOpenChatWith(chat.nodeNum)}
+              onPress={() => setOpenChat({ type: 'dm', id: chat.nodeNum })}
               activeOpacity={0.7}
             >
               <View style={[styles.nodeAvatar, styles.friendAvatar]}>
@@ -406,13 +661,15 @@ export default function DeviceDetailScreen({
           );
         })
       ) : (
-        <View style={styles.emptyState}>
-          <Text style={styles.emptyIcon}>💬</Text>
-          <Text style={styles.emptyTitle}>No messages</Text>
-          <Text style={styles.emptyText}>
-            Tap on a friend in the People tab to start a conversation
-          </Text>
-        </View>
+        activeChannels.length === 0 && (
+          <View style={styles.emptyState}>
+            <Text style={styles.emptyIcon}>💬</Text>
+            <Text style={styles.emptyTitle}>No messages</Text>
+            <Text style={styles.emptyText}>
+              Tap on a friend in the People tab to start a conversation
+            </Text>
+          </View>
+        )
       )}
 
       <View style={styles.bottomPadding} />
@@ -420,28 +677,58 @@ export default function DeviceDetailScreen({
   );
 
   const renderOpenChat = () => {
-    const chatPartner = openChatWith ? getNodeByNum(openChatWith) : undefined;
+    if (!openChat) return null;
+
+    const isChannel = openChat.type === 'channel';
+    const chatPartner = !isChannel ? getNodeByNum(openChat.id) : undefined;
+    const channel = isChannel ? channels.find(ch => ch.index === openChat.id) : undefined;
+
+    // Get chat header info
+    const headerName = isChannel
+      ? `#${channel?.name || `Channel ${openChat.id}`}`
+      : getNodeName(chatPartner);
+    const headerStatus = isChannel
+      ? (channel?.hasEncryption ? 'Encrypted' : 'Open')
+      : 'Online';
+    const headerInitials = isChannel ? '#' : getInitials(chatPartner);
 
     return (
       <KeyboardAvoidingView
         style={styles.chatContainer}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={0}
       >
         <View style={styles.chatHeader}>
           <TouchableOpacity
-            onPress={() => setOpenChatWith(null)}
+            onPress={() => setOpenChat(null)}
             style={styles.chatBackButton}
           >
             <Text style={styles.backButtonText}>‹</Text>
           </TouchableOpacity>
-          <View style={[styles.chatHeaderAvatar, styles.friendAvatar]}>
-            <Text style={styles.chatHeaderAvatarText}>{getInitials(chatPartner)}</Text>
+          <View style={[
+            styles.chatHeaderAvatar,
+            isChannel ? styles.channelAvatar : styles.friendAvatar
+          ]}>
+            <Text style={styles.chatHeaderAvatarText}>{headerInitials}</Text>
           </View>
           <View style={styles.chatHeaderInfo}>
-            <Text style={styles.chatHeaderName}>{getNodeName(chatPartner)}</Text>
-            <Text style={styles.chatHeaderStatus}>Online</Text>
+            <Text style={styles.chatHeaderName}>{headerName}</Text>
+            <Text style={[
+              styles.chatHeaderStatus,
+              isChannel && channel?.hasEncryption && styles.encryptedStatus
+            ]}>
+              {headerStatus}
+            </Text>
           </View>
+          {isChannel && (
+            <TouchableOpacity
+              style={styles.shareButton}
+              onPress={() => handleShareChannel(openChat.id)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.shareButtonText}>Share</Text>
+            </TouchableOpacity>
+          )}
         </View>
 
         <ScrollView
@@ -453,32 +740,45 @@ export default function DeviceDetailScreen({
           {chatMessages.length === 0 ? (
             <View style={styles.emptyChatState}>
               <Text style={styles.emptyChatText}>
-                Start a conversation with {getNodeName(chatPartner)}
+                {isChannel
+                  ? `Send a message to ${headerName}`
+                  : `Start a conversation with ${headerName}`
+                }
               </Text>
             </View>
           ) : (
-            chatMessages.map(msg => (
-              <View
-                key={msg.id}
-                style={[
-                  styles.messageBubble,
-                  msg.isOutgoing ? styles.outgoingBubble : styles.incomingBubble,
-                ]}
-              >
-                <Text style={[
-                  styles.messageText,
-                  msg.isOutgoing ? styles.outgoingText : styles.incomingText,
-                ]}>
-                  {msg.text}
-                </Text>
-                <Text style={[
-                  styles.messageTime,
-                  msg.isOutgoing ? styles.outgoingTime : styles.incomingTime,
-                ]}>
-                  {formatTime(msg.timestamp)}
-                </Text>
-              </View>
-            ))
+            chatMessages.map(msg => {
+              const senderNode = getNodeByNum(msg.from);
+              const senderName = getNodeName(senderNode);
+
+              return (
+                <View key={msg.id}>
+                  {/* Show sender name for channel messages (not outgoing) */}
+                  {isChannel && !msg.isOutgoing && (
+                    <Text style={styles.channelSenderName}>{senderName}</Text>
+                  )}
+                  <View
+                    style={[
+                      styles.messageBubble,
+                      msg.isOutgoing ? styles.outgoingBubble : styles.incomingBubble,
+                    ]}
+                  >
+                    <Text style={[
+                      styles.messageText,
+                      msg.isOutgoing ? styles.outgoingText : styles.incomingText,
+                    ]}>
+                      {msg.text}
+                    </Text>
+                    <Text style={[
+                      styles.messageTime,
+                      msg.isOutgoing ? styles.outgoingTime : styles.incomingTime,
+                    ]}>
+                      {formatTime(msg.timestamp)}
+                    </Text>
+                  </View>
+                </View>
+              );
+            })
           )}
         </ScrollView>
 
@@ -497,7 +797,7 @@ export default function DeviceDetailScreen({
               styles.sendButton,
               !messageText.trim() && styles.sendButtonDisabled,
             ]}
-            onPress={() => openChatWith && sendMessage(openChatWith, messageText)}
+            onPress={() => handleSendMessage()}
             disabled={!messageText.trim()}
             activeOpacity={0.7}
           >
@@ -509,7 +809,7 @@ export default function DeviceDetailScreen({
   };
 
   const renderChatTab = () => {
-    if (openChatWith) {
+    if (openChat) {
       return renderOpenChat();
     }
     return renderChatList();
@@ -517,7 +817,7 @@ export default function DeviceDetailScreen({
 
   return (
     <View style={styles.container}>
-      {!openChatWith && (
+      {!openChat && (
         <View style={styles.header}>
           <TouchableOpacity onPress={handleDisconnect} style={styles.backButton}>
             <Text style={styles.backButtonText}>‹ Back</Text>
@@ -529,7 +829,7 @@ export default function DeviceDetailScreen({
         </View>
       )}
 
-      {!openChatWith && (deviceStatus < DeviceStatusEnum.DeviceConfigured || error) && (
+      {!openChat && (deviceStatus < DeviceStatusEnum.DeviceConfigured || error) && (
         <View style={styles.statusContainer}>
           {deviceStatus === DeviceStatusEnum.DeviceConnecting && (
             <View style={styles.statusItem}>
@@ -568,7 +868,7 @@ export default function DeviceDetailScreen({
         </View>
       )}
 
-      {!openChatWith && (
+      {!openChat && (
         <View style={styles.tabBar}>
           <TouchableOpacity
             style={styles.tabItem}
@@ -612,6 +912,141 @@ export default function DeviceDetailScreen({
           </TouchableOpacity>
         </View>
       )}
+
+      {/* Create Group Modal */}
+      <Modal
+        visible={showCreateGroup}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setShowCreateGroup(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Create Group</Text>
+              <TouchableOpacity
+                onPress={() => setShowCreateGroup(false)}
+                style={styles.modalCloseButton}
+              >
+                <Text style={styles.modalCloseText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.modalLabel}>Group Name</Text>
+            <TextInput
+              style={styles.modalInput}
+              placeholder="Enter group name..."
+              placeholderTextColor="#8E8E93"
+              value={newGroupName}
+              onChangeText={setNewGroupName}
+              maxLength={30}
+              autoFocus
+            />
+
+            <Text style={styles.modalLabel}>Encryption</Text>
+            <View style={styles.encryptionOptions}>
+              <TouchableOpacity
+                style={[
+                  styles.encryptionOption,
+                  newGroupEncryption === 'aes256' && styles.encryptionOptionSelected,
+                ]}
+                onPress={() => setNewGroupEncryption('aes256')}
+              >
+                <Text style={[
+                  styles.encryptionOptionText,
+                  newGroupEncryption === 'aes256' && styles.encryptionOptionTextSelected,
+                ]}>
+                  AES-256
+                </Text>
+                <Text style={styles.encryptionOptionHint}>Recommended</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.encryptionOption,
+                  newGroupEncryption === 'aes128' && styles.encryptionOptionSelected,
+                ]}
+                onPress={() => setNewGroupEncryption('aes128')}
+              >
+                <Text style={[
+                  styles.encryptionOptionText,
+                  newGroupEncryption === 'aes128' && styles.encryptionOptionTextSelected,
+                ]}>
+                  AES-128
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.encryptionOption,
+                  newGroupEncryption === 'none' && styles.encryptionOptionSelected,
+                ]}
+                onPress={() => setNewGroupEncryption('none')}
+              >
+                <Text style={[
+                  styles.encryptionOptionText,
+                  newGroupEncryption === 'none' && styles.encryptionOptionTextSelected,
+                ]}>
+                  No encryption
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity
+              style={[
+                styles.createButton,
+                !newGroupName.trim() && styles.createButtonDisabled,
+              ]}
+              onPress={handleCreateGroup}
+              disabled={!newGroupName.trim()}
+            >
+              <Text style={styles.createButtonText}>Create Group</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Share Channel Modal */}
+      <Modal
+        visible={showShareModal}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setShowShareModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Share Group</Text>
+              <TouchableOpacity
+                onPress={() => setShowShareModal(false)}
+                style={styles.modalCloseButton}
+              >
+                <Text style={styles.modalCloseText}>Done</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.qrContainer}>
+              {shareChannelUrl && (
+                <QRCode
+                  value={shareChannelUrl}
+                  size={200}
+                  backgroundColor="white"
+                  color="black"
+                />
+              )}
+            </View>
+
+            <Text style={styles.shareHint}>
+              Scan this QR code with another Meshtastic device to join this channel
+            </Text>
+
+            <TouchableOpacity
+              style={styles.shareUrlButton}
+              onPress={handleShareLink}
+            >
+              <Text style={styles.shareUrlButtonText}>Share Link</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -723,6 +1158,9 @@ const styles = StyleSheet.create({
   friendAvatar: {
     backgroundColor: '#2AABEE',
   },
+  channelAvatar: {
+    backgroundColor: '#5856D6',
+  },
   nodeAvatarText: {
     fontSize: 18,
     fontWeight: '600',
@@ -757,6 +1195,10 @@ const styles = StyleSheet.create({
   chevron: {
     fontSize: 24,
     color: '#C7C7CC',
+  },
+  lockIcon: {
+    fontSize: 16,
+    marginLeft: 8,
   },
   emptyState: {
     flex: 1,
@@ -902,6 +1344,9 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#31B545',
   },
+  encryptedStatus: {
+    color: '#5856D6',
+  },
   messagesContainer: {
     flex: 1,
     backgroundColor: '#F4F4F5',
@@ -919,6 +1364,13 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: '#8E8E93',
     textAlign: 'center',
+  },
+  channelSenderName: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#5856D6',
+    marginBottom: 4,
+    marginTop: 8,
   },
   messageBubble: {
     maxWidth: '80%',
@@ -993,5 +1445,155 @@ const styles = StyleSheet.create({
     fontSize: 24,
     color: '#FFFFFF',
     fontWeight: '600',
+  },
+  // Create Group Button
+  createGroupButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  createGroupButtonText: {
+    fontSize: 14,
+    color: '#2AABEE',
+    fontWeight: '600',
+  },
+  emptyGroupsHint: {
+    backgroundColor: '#FFFFFF',
+    padding: 16,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#E5E5EA',
+  },
+  emptyGroupsText: {
+    fontSize: 14,
+    color: '#8E8E93',
+    textAlign: 'center',
+  },
+  // Modal Styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    padding: 20,
+    paddingBottom: Platform.OS === 'ios' ? 40 : 20,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: '600',
+    color: '#000000',
+  },
+  modalCloseButton: {
+    padding: 8,
+  },
+  modalCloseText: {
+    fontSize: 16,
+    color: '#2AABEE',
+  },
+  modalLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#8E8E93',
+    marginBottom: 8,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  modalInput: {
+    backgroundColor: '#F4F4F5',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    fontSize: 16,
+    color: '#000000',
+    marginBottom: 20,
+  },
+  encryptionOptions: {
+    flexDirection: 'row',
+    marginBottom: 24,
+    gap: 8,
+  },
+  encryptionOption: {
+    flex: 1,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: '#F4F4F5',
+    alignItems: 'center',
+  },
+  encryptionOptionSelected: {
+    backgroundColor: '#2AABEE',
+  },
+  encryptionOptionText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#000000',
+  },
+  encryptionOptionTextSelected: {
+    color: '#FFFFFF',
+  },
+  encryptionOptionHint: {
+    fontSize: 11,
+    color: '#8E8E93',
+    marginTop: 2,
+  },
+  createButton: {
+    backgroundColor: '#2AABEE',
+    borderRadius: 12,
+    paddingVertical: 16,
+    alignItems: 'center',
+  },
+  createButtonDisabled: {
+    backgroundColor: '#E5E5EA',
+  },
+  createButtonText: {
+    fontSize: 17,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  // Share Button
+  shareButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: '#5856D6',
+    borderRadius: 14,
+  },
+  shareButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  // QR Code Modal
+  qrContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+    padding: 24,
+    borderRadius: 16,
+    marginBottom: 20,
+  },
+  shareHint: {
+    fontSize: 14,
+    color: '#8E8E93',
+    textAlign: 'center',
+    marginBottom: 20,
+    lineHeight: 20,
+  },
+  shareUrlButton: {
+    backgroundColor: '#5856D6',
+    borderRadius: 12,
+    paddingVertical: 16,
+    alignItems: 'center',
+  },
+  shareUrlButtonText: {
+    fontSize: 17,
+    fontWeight: '600',
+    color: '#FFFFFF',
   },
 });

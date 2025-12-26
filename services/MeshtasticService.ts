@@ -2,8 +2,8 @@ import { Device, Subscription } from 'react-native-ble-plx';
 import { SimpleEventDispatcher } from 'ste-simple-events';
 import type * as Protobuf from '@meshtastic/protobufs';
 
-import { DeviceStatusEnum } from '../types';
-import type { NodeInfo, Message, PacketMetadata } from '../types';
+import { DeviceStatusEnum, ChannelRole } from '../types';
+import type { NodeInfo, Message, PacketMetadata, Channel } from '../types';
 import {
   MESHTASTIC_SERVICE_UUID,
   TORADIO_UUID,
@@ -27,6 +27,7 @@ class MeshtasticService {
   private _myNodeNum: number | null = null;
   private _deviceStatus: DeviceStatusEnum = DeviceStatusEnum.DeviceDisconnected;
   private nodes: Map<number, NodeInfo> = new Map();
+  private channels: Map<number, Channel> = new Map();
 
   // Typed event dispatchers (similar to @meshtastic/core EventSystem)
   readonly onDeviceStatus = new SimpleEventDispatcher<DeviceStatusEnum>();
@@ -35,6 +36,7 @@ class MeshtasticService {
   readonly onMessagePacket = new SimpleEventDispatcher<Message>();
   readonly onPositionPacket = new SimpleEventDispatcher<PacketMetadata<Protobuf.Mesh.Position>>();
   readonly onTelemetryPacket = new SimpleEventDispatcher<PacketMetadata<Protobuf.Telemetry.Telemetry>>();
+  readonly onChannelPacket = new SimpleEventDispatcher<Channel>();
   readonly onError = new SimpleEventDispatcher<Error>();
 
   get myNodeNum(): number | null {
@@ -51,6 +53,18 @@ class MeshtasticService {
 
   getNode(nodeNum: number): NodeInfo | undefined {
     return this.nodes.get(nodeNum);
+  }
+
+  getChannels(): Channel[] {
+    return Array.from(this.channels.values());
+  }
+
+  getChannel(index: number): Channel | undefined {
+    return this.channels.get(index);
+  }
+
+  getActiveChannels(): Channel[] {
+    return this.getChannels().filter(ch => ch.role !== ChannelRole.DISABLED);
   }
 
   isConnected(): boolean {
@@ -139,6 +153,7 @@ class MeshtasticService {
 
     this._myNodeNum = null;
     this.nodes.clear();
+    this.channels.clear();
     this.updateDeviceStatus(DeviceStatusEnum.DeviceDisconnected);
   }
 
@@ -213,6 +228,170 @@ class MeshtasticService {
   // Alias for backward compatibility
   async sendMessage(to: number, text: string): Promise<Message | null> {
     return this.sendText(text, to);
+  }
+
+  /**
+   * Create or update a channel
+   * @param index - Channel index (0-7)
+   * @param name - Channel name
+   * @param psk - Pre-shared key (0 bytes = no encryption, 16 = AES-128, 32 = AES-256)
+   * @param role - Channel role (PRIMARY, SECONDARY, DISABLED)
+   */
+  async setChannel(
+    index: number,
+    name: string,
+    psk: Uint8Array = new Uint8Array(),
+    role: ChannelRole = ChannelRole.SECONDARY
+  ): Promise<boolean> {
+    if (!this.device || !this._myNodeNum) {
+      return false;
+    }
+
+    try {
+      const { create, toBinary } = await import('@bufbuild/protobuf');
+      const { Mesh, Admin, Portnums, Channel: ChannelProto } = await import('@meshtastic/protobufs');
+
+      // Create channel settings
+      const channelSettings = create(ChannelProto.ChannelSettingsSchema, {
+        name,
+        psk,
+      });
+
+      // Create channel with role (ChannelSchema is in Channel namespace, not Mesh)
+      const channel = create(ChannelProto.ChannelSchema, {
+        index,
+        role: role as number,
+        settings: channelSettings,
+      });
+
+      // Create admin message
+      const adminMessage = create(Admin.AdminMessageSchema, {
+        payloadVariant: {
+          case: 'setChannel',
+          value: channel,
+        },
+      });
+
+      // Wrap in data payload
+      const dataPayload = create(Mesh.DataSchema, {
+        portnum: Portnums.PortNum.ADMIN_APP,
+        payload: toBinary(Admin.AdminMessageSchema, adminMessage),
+        wantResponse: true,
+      });
+
+      // Create mesh packet to self (admin messages go to self)
+      const packetId = Math.floor(Math.random() * 0xFFFFFFFF);
+      const meshPacket = create(Mesh.MeshPacketSchema, {
+        to: this._myNodeNum,
+        from: this._myNodeNum,
+        id: packetId,
+        wantAck: true,
+        payloadVariant: {
+          case: 'decoded',
+          value: dataPayload,
+        },
+      });
+
+      // Wrap in ToRadio
+      const toRadio = create(Mesh.ToRadioSchema, {
+        payloadVariant: {
+          case: 'packet',
+          value: meshPacket,
+        },
+      });
+
+      const payload = toBinary(Mesh.ToRadioSchema, toRadio);
+      const base64Payload = btoa(String.fromCharCode.apply(null, Array.from(payload)));
+
+      await this.device.writeCharacteristicWithResponseForService(
+        MESHTASTIC_SERVICE_UUID,
+        TORADIO_UUID,
+        base64Payload
+      );
+
+      // Update local channel state
+      const newChannel: Channel = {
+        index,
+        name,
+        role,
+        psk,
+        hasEncryption: psk.length > 0,
+      };
+      this.channels.set(index, newChannel);
+      this.onChannelPacket.dispatch(newChannel);
+
+      return true;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error('Failed to set channel');
+      this.onError.dispatch(error);
+      return false;
+    }
+  }
+
+  /**
+   * Delete a channel (set role to DISABLED)
+   */
+  async deleteChannel(index: number): Promise<boolean> {
+    // Channel 0 (PRIMARY) cannot be deleted
+    if (index === 0) {
+      this.onError.dispatch(new Error('Cannot delete primary channel'));
+      return false;
+    }
+
+    return this.setChannel(index, '', new Uint8Array(), ChannelRole.DISABLED);
+  }
+
+  /**
+   * Generate a random PSK of specified length
+   * @param length - 16 for AES-128, 32 for AES-256
+   */
+  generatePsk(length: 16 | 32 = 32): Uint8Array {
+    const psk = new Uint8Array(length);
+    for (let i = 0; i < length; i++) {
+      psk[i] = Math.floor(Math.random() * 256);
+    }
+    return psk;
+  }
+
+  /**
+   * Generate a shareable Meshtastic URL for a channel
+   * @param channelIndex - Channel index to share
+   * @returns Meshtastic URL or null if channel doesn't exist
+   */
+  async getChannelUrl(channelIndex: number): Promise<string | null> {
+    const channel = this.channels.get(channelIndex);
+    if (!channel) return null;
+
+    try {
+      const { create, toBinary } = await import('@bufbuild/protobuf');
+      const { AppOnly, Channel: ChannelProto } = await import('@meshtastic/protobufs');
+
+      // Create channel settings
+      const channelSettings = create(ChannelProto.ChannelSettingsSchema, {
+        name: channel.name,
+        psk: channel.psk || new Uint8Array(),
+      });
+
+      // Create ChannelSet with this channel's settings
+      const channelSet = create(AppOnly.ChannelSetSchema, {
+        settings: [channelSettings],
+      });
+
+      // Encode to binary
+      const payload = toBinary(AppOnly.ChannelSetSchema, channelSet);
+
+      // Base64url encode (Meshtastic uses URL-safe base64)
+      const base64 = btoa(String.fromCharCode.apply(null, Array.from(payload)))
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+
+      return `https://meshtastic.org/e/#${base64}`;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error('Failed to generate channel URL');
+      this.onError.dispatch(error);
+      return null;
+    }
   }
 
   private async requestConfig(): Promise<void> {
@@ -332,6 +511,32 @@ class MeshtasticService {
 
       case 'packet': {
         await this.handleMeshPacket(variant.value);
+        break;
+      }
+
+      case 'channel': {
+        const channelData = variant.value as {
+          index: number;
+          settings?: {
+            name?: string;
+            psk?: Uint8Array;
+          };
+          role?: number;
+        };
+
+        const role = channelData.role ?? 0;
+        const psk = channelData.settings?.psk;
+
+        const channel: Channel = {
+          index: channelData.index,
+          name: channelData.settings?.name || (channelData.index === 0 ? 'Primary' : `Channel ${channelData.index}`),
+          role: role as ChannelRole,
+          psk,
+          hasEncryption: psk !== undefined && psk.length > 0,
+        };
+
+        this.channels.set(channel.index, channel);
+        this.onChannelPacket.dispatch(channel);
         break;
       }
     }

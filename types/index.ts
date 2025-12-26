@@ -56,3 +56,25 @@ export interface MeshtasticDevice {
   signalPercent: number;
   device: Device;
 }
+
+// Channel role enum (matches Meshtastic protocol)
+export enum ChannelRole {
+  DISABLED = 0,
+  PRIMARY = 1,
+  SECONDARY = 2,
+}
+
+// Channel type for Meshtastic channels (0-7)
+export interface Channel {
+  index: number;           // 0-7
+  name: string;
+  role: ChannelRole;
+  psk?: Uint8Array;        // Encryption key (0=none, 16=AES-128, 32=AES-256)
+  hasEncryption: boolean;
+}
+
+// Chat target - either a DM or a channel
+export interface ChatTarget {
+  type: 'dm' | 'channel';
+  id: number;              // nodeNum for DM, channelIndex for channel
+}

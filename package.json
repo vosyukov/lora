@@ -19,6 +19,8 @@
     "react-dom": "19.1.0",
     "react-native": "0.81.5",
     "react-native-ble-plx": "^3.5.0",
+    "react-native-qrcode-svg": "^6.3.21",
+    "react-native-svg": "15.12.1",
     "react-native-web": "^0.21.0",
     "ste-simple-events": "^3.0.11"
   },
