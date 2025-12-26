@@ -7,6 +7,8 @@ Notifications.setNotificationHandler({
     shouldShowAlert: false, // Don't show when app is active
     shouldPlaySound: false,
     shouldSetBadge: false,
+    shouldShowBanner: false,
+    shouldShowList: false,
   }),
 });
 

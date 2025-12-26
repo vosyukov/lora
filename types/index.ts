@@ -37,17 +37,21 @@ export interface NodeInfo {
   snr?: number;
 }
 
+export type MessageStatus = 'pending' | 'sent' | 'delivered' | 'failed';
+
 export interface Message {
   id: string;
+  packetId?: number;        // Meshtastic packet ID for tracking ACK
   from: number;
   to: number;
   text: string;
   timestamp: number;
   isOutgoing: boolean;
   channel?: number;
+  status?: MessageStatus;   // Only for outgoing messages
 }
 
-export type ActiveTab = 'chat' | 'map' | 'settings';
+export type ActiveTab = 'chat' | 'map' | 'node' | 'settings';
 
 export interface MeshtasticDevice {
   id: string;

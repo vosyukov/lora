@@ -13,10 +13,12 @@ import {
   Modal,
   Share,
   Keyboard,
+  Switch,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Device } from 'react-native-ble-plx';
+import { Device, BleManager } from 'react-native-ble-plx';
 import QRCode from 'react-native-qrcode-svg';
+import * as Location from 'expo-location';
 
 import { meshtasticService } from '../services/MeshtasticService';
 import { notificationService } from '../services/NotificationService';
@@ -26,16 +28,22 @@ import {
   FRIENDS_STORAGE_KEY,
   MESSAGES_STORAGE_KEY,
   LAST_READ_STORAGE_KEY,
+  USER_NAME_KEY,
   MAX_STORED_MESSAGES,
 } from '../constants/meshtastic';
 
+const GPS_ENABLED_KEY = '@gps_enabled';
+const GPS_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
 interface DeviceDetailScreenProps {
   device: Device;
+  bleManager: BleManager;
   onBack: () => void;
 }
 
 export default function DeviceDetailScreen({
   device,
+  bleManager,
   onBack,
 }: DeviceDetailScreenProps) {
   const [deviceStatus, setDeviceStatus] = useState<DeviceStatusEnum>(
@@ -56,6 +64,27 @@ export default function DeviceDetailScreen({
   const [showShareModal, setShowShareModal] = useState(false);
   const [shareChannelUrl, setShareChannelUrl] = useState<string | null>(null);
   const [lastReadTimestamps, setLastReadTimestamps] = useState<Record<string, number>>({});
+  const [showNameModal, setShowNameModal] = useState(false);
+  const [userName, setUserName] = useState<string | null>(null);
+  const [nameInput, setNameInput] = useState('');
+  const [deviceTelemetry, setDeviceTelemetry] = useState<{
+    batteryLevel?: number;
+    voltage?: number;
+    channelUtilization?: number;
+    airUtilTx?: number;
+    uptimeSeconds?: number;
+  }>({});
+
+  // GPS state
+  const [gpsEnabled, setGpsEnabled] = useState(false);
+  const [gpsPermissionGranted, setGpsPermissionGranted] = useState(false);
+  const [currentLocation, setCurrentLocation] = useState<{
+    latitude: number;
+    longitude: number;
+    altitude?: number;
+  } | null>(null);
+  const [lastGpsSent, setLastGpsSent] = useState<number | null>(null);
+  const gpsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const scrollViewRef = useRef<ScrollView>(null);
 
@@ -156,12 +185,41 @@ export default function DeviceDetailScreen({
     loadFriends();
     loadMessages();
     loadLastRead();
+    loadUserName();
+    loadGpsSettings();
     notificationService.initialize();
 
     return () => {
       notificationService.cleanup();
+      // Clean up GPS interval
+      if (gpsIntervalRef.current) {
+        clearInterval(gpsIntervalRef.current);
+      }
     };
   }, []);
+
+  // Show name modal when device is configured and no name is set
+  useEffect(() => {
+    if (deviceStatus === DeviceStatusEnum.DeviceConfigured && userName === null) {
+      // Check if we need to ask for name (first time setup)
+      AsyncStorage.getItem(USER_NAME_KEY).then(savedName => {
+        if (!savedName) {
+          setShowNameModal(true);
+        }
+      });
+    }
+  }, [deviceStatus, userName]);
+
+  // Auto-start GPS when device is configured and GPS was enabled
+  useEffect(() => {
+    if (deviceStatus === DeviceStatusEnum.DeviceConfigured) {
+      AsyncStorage.getItem(GPS_ENABLED_KEY).then(stored => {
+        if (stored === 'true') {
+          startGpsTracking();
+        }
+      });
+    }
+  }, [deviceStatus]);
 
   // Connect to device and subscribe to events
   useEffect(() => {
@@ -252,10 +310,55 @@ export default function DeviceDetailScreen({
       });
     });
 
+    // Subscribe to message ACK events for delivery status
+    const unsubAck = meshtasticService.onMessageAck.subscribe(({ packetId, success }) => {
+      setMessages(prev => {
+        const msgIndex = prev.findIndex(m => m.packetId === packetId);
+        if (msgIndex === -1) return prev;
+
+        const updated = [...prev];
+        updated[msgIndex] = {
+          ...updated[msgIndex],
+          status: success ? 'delivered' : 'failed',
+        };
+        saveMessages(updated);
+        return updated;
+      });
+    });
+
     const unsubError = meshtasticService.onError.subscribe((err) => {
       setError(err.message);
     });
 
+    // Subscribe to telemetry for device stats
+    const unsubTelemetry = meshtasticService.onTelemetryPacket.subscribe((packet) => {
+      // Only process telemetry from our own node
+      if (packet.from !== meshtasticService.myNodeNum) return;
+
+      const telemetry = packet.data;
+      const variant = (telemetry as { variant?: { case: string; value: unknown } }).variant;
+
+      if (variant?.case === 'deviceMetrics') {
+        const metrics = variant.value as {
+          batteryLevel?: number;
+          voltage?: number;
+          channelUtilization?: number;
+          airUtilTx?: number;
+          uptimeSeconds?: number;
+        };
+        setDeviceTelemetry(prev => ({
+          ...prev,
+          batteryLevel: metrics.batteryLevel,
+          voltage: metrics.voltage,
+          channelUtilization: metrics.channelUtilization,
+          airUtilTx: metrics.airUtilTx,
+          uptimeSeconds: metrics.uptimeSeconds,
+        }));
+      }
+    });
+
+    // Set BLE manager for reconnection support
+    meshtasticService.setBleManager(bleManager);
     meshtasticService.connect(device).catch(() => {
       // Error is handled via event
     });
@@ -266,6 +369,8 @@ export default function DeviceDetailScreen({
       unsubNodeInfo();
       unsubChannel();
       unsubMessage();
+      unsubAck();
+      unsubTelemetry();
       unsubError();
       meshtasticService.disconnect();
     };
@@ -328,6 +433,171 @@ export default function DeviceDetailScreen({
       await AsyncStorage.setItem(LAST_READ_STORAGE_KEY, JSON.stringify(timestamps));
     } catch {
       // Ignore save errors
+    }
+  };
+
+  const loadUserName = async () => {
+    try {
+      const stored = await AsyncStorage.getItem(USER_NAME_KEY);
+      if (stored) {
+        setUserName(stored);
+      }
+    } catch {
+      // Ignore load errors
+    }
+  };
+
+  const saveUserName = async (name: string) => {
+    try {
+      await AsyncStorage.setItem(USER_NAME_KEY, name);
+      setUserName(name);
+    } catch {
+      // Ignore save errors
+    }
+  };
+
+  // GPS functions
+  const loadGpsSettings = async () => {
+    try {
+      const stored = await AsyncStorage.getItem(GPS_ENABLED_KEY);
+      if (stored === 'true') {
+        // Will be enabled after permission check
+        checkGpsPermission();
+      }
+    } catch {
+      // Ignore load errors
+    }
+  };
+
+  const saveGpsEnabled = async (enabled: boolean) => {
+    try {
+      await AsyncStorage.setItem(GPS_ENABLED_KEY, enabled ? 'true' : 'false');
+    } catch {
+      // Ignore save errors
+    }
+  };
+
+  const checkGpsPermission = async () => {
+    const { status } = await Location.getForegroundPermissionsAsync();
+    setGpsPermissionGranted(status === 'granted');
+    return status === 'granted';
+  };
+
+  const requestGpsPermission = async (): Promise<boolean> => {
+    console.log('requestGpsPermission: calling Location.requestForegroundPermissionsAsync()');
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      console.log('requestGpsPermission: status =', status);
+      const granted = status === 'granted';
+      setGpsPermissionGranted(granted);
+      return granted;
+    } catch (err) {
+      console.error('requestGpsPermission error:', err);
+      return false;
+    }
+  };
+
+  const sendCurrentPosition = async () => {
+    console.log('sendCurrentPosition called, isConnected:', meshtasticService.isConnected());
+    if (!meshtasticService.isConnected()) return;
+
+    try {
+      console.log('Getting current position...');
+      const location = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+
+      console.log('Got position:', location.coords.latitude, location.coords.longitude);
+
+      setCurrentLocation({
+        latitude: location.coords.latitude,
+        longitude: location.coords.longitude,
+        altitude: location.coords.altitude ?? undefined,
+      });
+
+      const success = await meshtasticService.sendPosition(
+        location.coords.latitude,
+        location.coords.longitude,
+        location.coords.altitude ?? undefined
+      );
+
+      console.log('sendPosition result:', success);
+
+      if (success) {
+        setLastGpsSent(Date.now());
+      }
+    } catch (err) {
+      console.warn('Failed to send position:', err);
+    }
+  };
+
+  const startGpsTracking = async () => {
+    console.log('startGpsTracking called, gpsPermissionGranted:', gpsPermissionGranted);
+
+    // Check/request permission
+    let hasPermission = gpsPermissionGranted;
+    if (!hasPermission) {
+      console.log('Requesting GPS permission...');
+      hasPermission = await requestGpsPermission();
+      console.log('Permission result:', hasPermission);
+    }
+
+    if (!hasPermission) {
+      console.log('Permission denied, showing alert');
+      Alert.alert(
+        'Доступ к GPS',
+        'Для передачи позиции друзьям нужен доступ к геолокации.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    console.log('GPS permission granted, enabling tracking');
+    setGpsEnabled(true);
+    saveGpsEnabled(true);
+
+    // Send position immediately
+    sendCurrentPosition();
+
+    // Start periodic updates
+    if (gpsIntervalRef.current) {
+      clearInterval(gpsIntervalRef.current);
+    }
+    gpsIntervalRef.current = setInterval(sendCurrentPosition, GPS_INTERVAL_MS);
+  };
+
+  const stopGpsTracking = () => {
+    setGpsEnabled(false);
+    saveGpsEnabled(false);
+
+    if (gpsIntervalRef.current) {
+      clearInterval(gpsIntervalRef.current);
+      gpsIntervalRef.current = null;
+    }
+  };
+
+  const toggleGps = () => {
+    console.log('toggleGps called, gpsEnabled:', gpsEnabled);
+    if (gpsEnabled) {
+      stopGpsTracking();
+    } else {
+      startGpsTracking();
+    }
+  };
+
+  const handleSetUserName = async () => {
+    const name = nameInput.trim();
+    if (!name) return;
+
+    const shortName = meshtasticService.generateShortName(name);
+    const success = await meshtasticService.setOwner(name, shortName);
+
+    if (success) {
+      await saveUserName(name);
+      setShowNameModal(false);
+      setNameInput('');
+    } else {
+      Alert.alert('Ошибка', 'Не удалось установить имя. Попробуйте ещё раз.');
     }
   };
 
@@ -848,6 +1118,20 @@ export default function DeviceDetailScreen({
               const senderNode = getNodeByNum(msg.from);
               const senderName = getNodeName(senderNode);
 
+              // Status indicator for outgoing messages
+              const getStatusIcon = () => {
+                if (!msg.isOutgoing) return null;
+                switch (msg.status) {
+                  case 'delivered':
+                    return <Text style={styles.statusIcon}>✓✓</Text>;
+                  case 'failed':
+                    return <Text style={[styles.statusIcon, styles.statusFailed]}>!</Text>;
+                  case 'sent':
+                  default:
+                    return <Text style={styles.statusIcon}>✓</Text>;
+                }
+              };
+
               return (
                 <View key={msg.id}>
                   {/* Show sender name for channel messages (not outgoing) */}
@@ -866,12 +1150,15 @@ export default function DeviceDetailScreen({
                     ]}>
                       {msg.text}
                     </Text>
-                    <Text style={[
-                      styles.messageTime,
-                      msg.isOutgoing ? styles.outgoingTime : styles.incomingTime,
-                    ]}>
-                      {formatTime(msg.timestamp)}
-                    </Text>
+                    <View style={styles.messageFooter}>
+                      <Text style={[
+                        styles.messageTime,
+                        msg.isOutgoing ? styles.outgoingTime : styles.incomingTime,
+                      ]}>
+                        {formatTime(msg.timestamp)}
+                      </Text>
+                      {getStatusIcon()}
+                    </View>
                   </View>
                 </View>
               );
@@ -912,39 +1199,252 @@ export default function DeviceDetailScreen({
     return renderChatList();
   };
 
+  const formatUptime = (seconds?: number): string => {
+    if (!seconds) return '—';
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    if (hours > 0) {
+      return `${hours}ч ${minutes}м`;
+    }
+    return `${minutes}м`;
+  };
+
+  const getMyNode = (): NodeInfo | undefined => {
+    if (!myNodeNum) return undefined;
+    return nodes.find(n => n.nodeNum === myNodeNum);
+  };
+
+  const renderNodeTab = () => {
+    const myNode = getMyNode();
+    const statusText = deviceStatus === DeviceStatusEnum.DeviceConfigured ? 'Подключено' :
+                       deviceStatus === DeviceStatusEnum.DeviceReconnecting ? 'Переподключение...' :
+                       deviceStatus === DeviceStatusEnum.DeviceConnecting ? 'Подключение...' :
+                       'Отключено';
+    const statusColor = deviceStatus === DeviceStatusEnum.DeviceConfigured ? '#31B545' :
+                        deviceStatus === DeviceStatusEnum.DeviceReconnecting ? '#FF9500' :
+                        '#FF3B30';
+
+    return (
+      <ScrollView style={styles.nodesList} showsVerticalScrollIndicator={false}>
+        {/* Device Info */}
+        <Text style={styles.sectionHeader}>УСТРОЙСТВО</Text>
+        <View style={styles.nodeStatusCard}>
+          <View style={styles.nodeStatusRow}>
+            <Text style={styles.nodeStatusLabel}>Название</Text>
+            <Text style={styles.nodeStatusValue}>{device.name || 'Неизвестно'}</Text>
+          </View>
+          <View style={styles.nodeStatusRow}>
+            <Text style={styles.nodeStatusLabel}>Статус</Text>
+            <Text style={[styles.nodeStatusValue, { color: statusColor }]}>{statusText}</Text>
+          </View>
+          <View style={styles.nodeStatusRow}>
+            <Text style={styles.nodeStatusLabel}>ID ноды</Text>
+            <Text style={styles.nodeStatusValue}>
+              {myNodeNum ? `!${myNodeNum.toString(16)}` : '—'}
+            </Text>
+          </View>
+          {myNode?.hwModel && (
+            <View style={styles.nodeStatusRow}>
+              <Text style={styles.nodeStatusLabel}>Модель</Text>
+              <Text style={styles.nodeStatusValue}>{myNode.hwModel}</Text>
+            </View>
+          )}
+        </View>
+
+        {/* Battery & Metrics */}
+        <Text style={styles.sectionHeader}>СОСТОЯНИЕ</Text>
+        <View style={styles.nodeStatusCard}>
+          <View style={styles.nodeStatusRow}>
+            <Text style={styles.nodeStatusLabel}>Батарея</Text>
+            <Text style={styles.nodeStatusValue}>
+              {deviceTelemetry.batteryLevel !== undefined
+                ? `${deviceTelemetry.batteryLevel}%`
+                : '—'}
+            </Text>
+          </View>
+          <View style={styles.nodeStatusRow}>
+            <Text style={styles.nodeStatusLabel}>Напряжение</Text>
+            <Text style={styles.nodeStatusValue}>
+              {deviceTelemetry.voltage !== undefined
+                ? `${deviceTelemetry.voltage.toFixed(2)}V`
+                : '—'}
+            </Text>
+          </View>
+          <View style={styles.nodeStatusRow}>
+            <Text style={styles.nodeStatusLabel}>Время работы</Text>
+            <Text style={styles.nodeStatusValue}>{formatUptime(deviceTelemetry.uptimeSeconds)}</Text>
+          </View>
+        </View>
+
+        {/* Radio Stats */}
+        <Text style={styles.sectionHeader}>РАДИО</Text>
+        <View style={styles.nodeStatusCard}>
+          <View style={styles.nodeStatusRow}>
+            <Text style={styles.nodeStatusLabel}>Загрузка канала</Text>
+            <Text style={styles.nodeStatusValue}>
+              {deviceTelemetry.channelUtilization !== undefined
+                ? `${deviceTelemetry.channelUtilization.toFixed(1)}%`
+                : '—'}
+            </Text>
+          </View>
+          <View style={styles.nodeStatusRow}>
+            <Text style={styles.nodeStatusLabel}>TX использование</Text>
+            <Text style={styles.nodeStatusValue}>
+              {deviceTelemetry.airUtilTx !== undefined
+                ? `${deviceTelemetry.airUtilTx.toFixed(1)}%`
+                : '—'}
+            </Text>
+          </View>
+        </View>
+
+        {/* Network Stats */}
+        <Text style={styles.sectionHeader}>СЕТЬ</Text>
+        <View style={styles.nodeStatusCard}>
+          <View style={styles.nodeStatusRow}>
+            <Text style={styles.nodeStatusLabel}>Ноды в сети</Text>
+            <Text style={styles.nodeStatusValue}>{nodes.length}</Text>
+          </View>
+          <View style={styles.nodeStatusRow}>
+            <Text style={styles.nodeStatusLabel}>Активных каналов</Text>
+            <Text style={styles.nodeStatusValue}>{activeChannels.length}</Text>
+          </View>
+          <View style={styles.nodeStatusRow}>
+            <Text style={styles.nodeStatusLabel}>Друзья</Text>
+            <Text style={styles.nodeStatusValue}>{friendIds.size}</Text>
+          </View>
+        </View>
+
+        {/* GPS */}
+        <Text style={styles.sectionHeader}>GPS</Text>
+        <View style={styles.nodeStatusCard}>
+          <View style={styles.nodeStatusRow}>
+            <View style={styles.gpsLabelContainer}>
+              <Text style={styles.nodeStatusLabel}>Передавать позицию</Text>
+              <Text style={styles.gpsHint}>
+                Друзья увидят вас на карте
+              </Text>
+            </View>
+            <Switch
+              value={gpsEnabled}
+              onValueChange={toggleGps}
+              trackColor={{ false: '#E5E5EA', true: '#31B545' }}
+              thumbColor="#FFFFFF"
+            />
+          </View>
+          {gpsEnabled && currentLocation && (
+            <>
+              <View style={styles.nodeStatusRow}>
+                <Text style={styles.nodeStatusLabel}>Координаты</Text>
+                <Text style={styles.nodeStatusValue}>
+                  {currentLocation.latitude.toFixed(5)}, {currentLocation.longitude.toFixed(5)}
+                </Text>
+              </View>
+              {lastGpsSent && (
+                <View style={styles.nodeStatusRow}>
+                  <Text style={styles.nodeStatusLabel}>Отправлено</Text>
+                  <Text style={styles.nodeStatusValue}>
+                    {formatTime(lastGpsSent)}
+                  </Text>
+                </View>
+              )}
+            </>
+          )}
+          {gpsEnabled && !currentLocation && (
+            <View style={styles.nodeStatusRow}>
+              <Text style={styles.nodeStatusLabel}>Статус</Text>
+              <Text style={styles.nodeStatusValue}>Определение...</Text>
+            </View>
+          )}
+        </View>
+
+        {/* User Info */}
+        {userName && (
+          <>
+            <Text style={styles.sectionHeader}>ПРОФИЛЬ</Text>
+            <View style={styles.nodeStatusCard}>
+              <View style={styles.nodeStatusRow}>
+                <Text style={styles.nodeStatusLabel}>Имя</Text>
+                <Text style={styles.nodeStatusValue}>{userName}</Text>
+              </View>
+              <View style={styles.nodeStatusRow}>
+                <Text style={styles.nodeStatusLabel}>Короткое имя</Text>
+                <Text style={styles.nodeStatusValue}>
+                  {meshtasticService.generateShortName(userName)}
+                </Text>
+              </View>
+            </View>
+          </>
+        )}
+
+        <View style={styles.bottomPadding} />
+      </ScrollView>
+    );
+  };
+
+  const getStatusInfo = () => {
+    if (deviceStatus === DeviceStatusEnum.DeviceConfigured) {
+      return { text: 'Подключено', color: '#31B545', showSpinner: false };
+    }
+    if (deviceStatus === DeviceStatusEnum.DeviceReconnecting) {
+      return {
+        text: `Переподключение (${meshtasticService.reconnectAttemptsCount}/${meshtasticService.maxReconnectAttempts})`,
+        color: '#FF9500',
+        showSpinner: true
+      };
+    }
+    if (deviceStatus === DeviceStatusEnum.DeviceConnecting) {
+      return { text: 'Подключение...', color: '#2AABEE', showSpinner: true };
+    }
+    if (deviceStatus === DeviceStatusEnum.DeviceConfiguring) {
+      return { text: 'Загрузка...', color: '#2AABEE', showSpinner: true };
+    }
+    return { text: 'Отключено', color: '#FF3B30', showSpinner: false };
+  };
+
+  const statusInfo = getStatusInfo();
+
   return (
     <View style={styles.container}>
+      {/* Top Status Bar - visible on all screens except open chat */}
       {!openChat && (
-        <View style={styles.header}>
-          <TouchableOpacity onPress={handleDisconnect} style={styles.backButton}>
-            <Text style={styles.backButtonText}>‹ Back</Text>
+        <View style={styles.topStatusBar}>
+          <TouchableOpacity onPress={handleDisconnect} style={styles.topStatusBackButton}>
+            <Text style={styles.topStatusBackText}>‹</Text>
           </TouchableOpacity>
-          <Text style={styles.title} numberOfLines={1}>
-            {device.name || 'Radio'}
-          </Text>
-          <View style={styles.headerRight} />
+
+          <View style={styles.topStatusCenter}>
+            <View style={styles.topStatusRow}>
+              {statusInfo.showSpinner ? (
+                <ActivityIndicator size="small" color={statusInfo.color} style={styles.topStatusSpinner} />
+              ) : (
+                <View style={[styles.topStatusDot, { backgroundColor: statusInfo.color }]} />
+              )}
+              <Text style={[styles.topStatusText, { color: statusInfo.color }]}>
+                {statusInfo.text}
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.topStatusRight}>
+            {deviceTelemetry.batteryLevel !== undefined && (
+              <View style={styles.topStatusBattery}>
+                <Text style={styles.topStatusBatteryText}>
+                  {deviceTelemetry.batteryLevel}%
+                </Text>
+                <Text style={styles.topStatusBatteryIcon}>
+                  {deviceTelemetry.batteryLevel > 80 ? '🔋' :
+                   deviceTelemetry.batteryLevel > 20 ? '🔋' : '🪫'}
+                </Text>
+              </View>
+            )}
+          </View>
         </View>
       )}
 
-      {!openChat && (deviceStatus < DeviceStatusEnum.DeviceConfigured || error) && (
-        <View style={styles.statusContainer}>
-          {deviceStatus === DeviceStatusEnum.DeviceConnecting && (
-            <View style={styles.statusItem}>
-              <ActivityIndicator size="small" color="#2AABEE" />
-              <Text style={styles.statusText}>Connecting...</Text>
-            </View>
-          )}
-          {deviceStatus === DeviceStatusEnum.DeviceConfiguring && (
-            <View style={styles.statusItem}>
-              <ActivityIndicator size="small" color="#2AABEE" />
-              <Text style={styles.statusText}>Loading data...</Text>
-            </View>
-          )}
-          {error && (
-            <View style={styles.errorContainer}>
-              <Text style={styles.errorText}>{error}</Text>
-            </View>
-          )}
+      {/* Error banner if any */}
+      {!openChat && error && (
+        <View style={styles.errorBanner}>
+          <Text style={styles.errorBannerText}>{error}</Text>
         </View>
       )}
 
@@ -956,6 +1456,7 @@ export default function DeviceDetailScreen({
           <Text style={styles.emptyText}>Карта с друзьями скоро будет</Text>
         </View>
       )}
+      {activeTab === 'node' && renderNodeTab()}
       {activeTab === 'settings' && (
         <View style={styles.emptyState}>
           <Text style={styles.emptyIcon}>⚙️</Text>
@@ -984,6 +1485,16 @@ export default function DeviceDetailScreen({
             <Text style={styles.tabIcon}>🗺️</Text>
             <Text style={[styles.tabLabel, activeTab === 'map' && styles.tabLabelActive]}>
               Карта
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.tabItem}
+            activeOpacity={0.7}
+            onPress={() => setActiveTab('node')}
+          >
+            <Text style={styles.tabIcon}>📻</Text>
+            <Text style={[styles.tabLabel, activeTab === 'node' && styles.tabLabelActive]}>
+              Рация
             </Text>
           </TouchableOpacity>
           <TouchableOpacity
@@ -1133,6 +1644,44 @@ export default function DeviceDetailScreen({
           </View>
         </View>
       </Modal>
+
+      {/* Name Setup Modal */}
+      <Modal
+        visible={showNameModal}
+        animationType="fade"
+        transparent
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Как вас зовут?</Text>
+            <Text style={styles.modalSubtitle}>
+              Это имя увидят ваши друзья в сети
+            </Text>
+            <TextInput
+              style={styles.nameInput}
+              placeholder="Введите ваше имя"
+              placeholderTextColor="#8E8E93"
+              value={nameInput}
+              onChangeText={setNameInput}
+              autoFocus
+              returnKeyType="done"
+              onSubmitEditing={handleSetUserName}
+            />
+            {nameInput.trim() && (
+              <Text style={styles.shortNamePreview}>
+                Короткое имя: {meshtasticService.generateShortName(nameInput)}
+              </Text>
+            )}
+            <TouchableOpacity
+              style={[styles.modalButton, !nameInput.trim() && styles.modalButtonDisabled]}
+              onPress={handleSetUserName}
+              disabled={!nameInput.trim()}
+            >
+              <Text style={styles.modalButtonText}>Сохранить</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -1142,58 +1691,9 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#F4F4F5',
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingTop: Platform.OS === 'ios' ? 50 : 16,
-    paddingBottom: 12,
-    paddingHorizontal: 16,
-    backgroundColor: '#FFFFFF',
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#E5E5EA',
-  },
-  backButton: {
-    width: 70,
-  },
   backButtonText: {
     fontSize: 17,
     color: '#2AABEE',
-  },
-  title: {
-    flex: 1,
-    fontSize: 17,
-    fontWeight: '600',
-    color: '#000000',
-    textAlign: 'center',
-  },
-  headerRight: {
-    width: 70,
-  },
-  statusContainer: {
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    backgroundColor: '#FFFFFF',
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#E5E5EA',
-  },
-  statusItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  statusText: {
-    marginLeft: 10,
-    fontSize: 14,
-    color: '#8E8E93',
-  },
-  errorContainer: {
-    backgroundColor: '#FFEBEE',
-    padding: 10,
-    borderRadius: 8,
-  },
-  errorText: {
-    color: '#C62828',
-    fontSize: 14,
   },
   nodesList: {
     flex: 1,
@@ -1507,15 +2007,29 @@ const styles = StyleSheet.create({
   outgoingText: {
     color: '#FFFFFF',
   },
+  messageFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+  },
   messageTime: {
     fontSize: 11,
-    marginTop: 4,
   },
   incomingTime: {
     color: '#8E8E93',
   },
   outgoingTime: {
     color: 'rgba(255,255,255,0.7)',
+  },
+  statusIcon: {
+    fontSize: 11,
+    color: 'rgba(255,255,255,0.7)',
+    marginLeft: 4,
+    fontWeight: '600',
+  },
+  statusFailed: {
+    color: '#FF6B6B',
+    fontWeight: '700',
   },
   inputContainer: {
     flexDirection: 'row',
@@ -1598,6 +2112,44 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '600',
     color: '#000000',
+    marginBottom: 8,
+  },
+  modalSubtitle: {
+    fontSize: 15,
+    color: '#8E8E93',
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  nameInput: {
+    backgroundColor: '#F4F4F5',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    fontSize: 17,
+    color: '#000000',
+    width: '100%',
+    marginBottom: 12,
+  },
+  shortNamePreview: {
+    fontSize: 14,
+    color: '#8E8E93',
+    marginBottom: 20,
+  },
+  modalButton: {
+    backgroundColor: '#2AABEE',
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    width: '100%',
+    alignItems: 'center',
+  },
+  modalButtonDisabled: {
+    backgroundColor: '#C7C7CC',
+  },
+  modalButtonText: {
+    fontSize: 17,
+    fontWeight: '600',
+    color: '#FFFFFF',
   },
   modalCloseButton: {
     padding: 8,
@@ -1703,5 +2255,110 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: '600',
     color: '#FFFFFF',
+  },
+  // Top Status Bar Styles
+  topStatusBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingTop: Platform.OS === 'ios' ? 50 : 16,
+    paddingBottom: 12,
+    paddingHorizontal: 12,
+    backgroundColor: '#FFFFFF',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#E5E5EA',
+  },
+  topStatusBackButton: {
+    width: 36,
+    height: 36,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  topStatusBackText: {
+    fontSize: 28,
+    color: '#2AABEE',
+    fontWeight: '300',
+  },
+  topStatusCenter: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  topStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  topStatusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+  topStatusSpinner: {
+    marginRight: 6,
+    transform: [{ scale: 0.7 }],
+  },
+  topStatusText: {
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  topStatusRight: {
+    width: 60,
+    alignItems: 'flex-end',
+  },
+  topStatusBattery: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  topStatusBatteryText: {
+    fontSize: 12,
+    color: '#8E8E93',
+    marginRight: 2,
+  },
+  topStatusBatteryIcon: {
+    fontSize: 14,
+  },
+  errorBanner: {
+    backgroundColor: '#FFEBEE',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+  },
+  errorBannerText: {
+    color: '#C62828',
+    fontSize: 13,
+    textAlign: 'center',
+  },
+  // Node Status Tab Styles
+  nodeStatusCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    marginHorizontal: 16,
+    overflow: 'hidden',
+  },
+  nodeStatusRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#E5E5EA',
+  },
+  nodeStatusLabel: {
+    fontSize: 16,
+    color: '#000000',
+  },
+  nodeStatusValue: {
+    fontSize: 16,
+    color: '#8E8E93',
+    fontWeight: '500',
+  },
+  // GPS Styles
+  gpsLabelContainer: {
+    flex: 1,
+  },
+  gpsHint: {
+    fontSize: 13,
+    color: '#8E8E93',
+    marginTop: 2,
   },
 });

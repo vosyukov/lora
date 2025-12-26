@@ -16,7 +16,8 @@
       "supportsTablet": true,
       "infoPlist": {
         "NSBluetoothAlwaysUsageDescription": "This app uses Bluetooth to scan and connect to nearby BLE devices.",
-        "NSBluetoothPeripheralUsageDescription": "This app uses Bluetooth to scan and connect to nearby BLE devices."
+        "NSBluetoothPeripheralUsageDescription": "This app uses Bluetooth to scan and connect to nearby BLE devices.",
+        "NSLocationWhenInUseUsageDescription": "This app uses your location to share your position with friends on the mesh network."
       }
     },
     "android": {
@@ -53,6 +54,12 @@
             "central"
           ],
           "bluetoothAlwaysUsageDescription": "This app uses Bluetooth to scan and connect to nearby BLE devices."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow $(PRODUCT_NAME) to use your location to share your position with friends."
         }
       ]
     ],

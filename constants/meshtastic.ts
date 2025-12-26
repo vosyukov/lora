@@ -13,9 +13,15 @@ export const POLL_INTERVAL_MS = 2000;
 export const INITIAL_READ_DELAY_MS = 200;
 export const MAX_EMPTY_READS = 5;
 
+// Reconnect configuration
+export const MAX_RECONNECT_ATTEMPTS = 10;
+export const RECONNECT_DELAY_MS = 3000;
+export const RECONNECT_SCAN_TIMEOUT_MS = 10000;
+
 // Storage keys
 export const FRIENDS_STORAGE_KEY = '@friends_ids';
 export const MESSAGES_STORAGE_KEY = '@messages';
 export const LAST_DEVICE_KEY = '@last_device';
 export const LAST_READ_STORAGE_KEY = '@last_read';
+export const USER_NAME_KEY = '@user_name';
 export const MAX_STORED_MESSAGES = 500;

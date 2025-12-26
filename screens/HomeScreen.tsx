@@ -400,6 +400,7 @@ export default function HomeScreen() {
     return (
       <DeviceDetailScreen
         device={connectedDevice}
+        bleManager={bleManager}
         onBack={() => {
           clearLastDevice();
           resetWizard();
