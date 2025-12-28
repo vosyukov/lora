@@ -5,32 +5,19 @@ import {
   StyleSheet,
   TouchableOpacity,
   Modal,
-  Platform,
-  PermissionsAndroid,
   ActivityIndicator,
   Animated,
   Easing,
   ScrollView,
   Linking,
+  Platform,
 } from 'react-native';
 import { BleManager, Device, State } from 'react-native-ble-plx';
-import { MESHTASTIC_SERVICE_UUID } from '../constants/meshtastic';
+import { MESHTASTIC_SERVICE_UUID, COLORS } from '../constants/meshtastic';
+import { rssiToPercent, getDeviceName, requestBlePermissions } from '../utils/ble';
 
-const colors = {
-  primary: '#2AABEE',
-  primaryDark: '#229ED9',
-  background: '#FFFFFF',
-  backgroundGray: '#F4F4F5',
-  text: '#000000',
-  textSecondary: '#8E8E93',
-  textHint: '#999999',
-  success: '#31B545',
-  error: '#FF3B30',
-  warning: '#FF9500',
-  border: '#E5E5EA',
-  cardBackground: '#FFFFFF',
-  overlay: 'rgba(0, 0, 0, 0.5)',
-};
+// Use shared COLORS from constants
+const colors = COLORS;
 
 type ScanStep =
   | 'welcome'
@@ -85,7 +72,7 @@ export default function ScannerModal({
   // Request permissions when modal opens
   useEffect(() => {
     if (visible) {
-      requestPermissions();
+      requestBlePermissions();
       setStep('welcome');
       setDevices([]);
       setSelectedDevice(null);
@@ -132,43 +119,7 @@ export default function ScannerModal({
     }
   }, [step, progressAnim]);
 
-  const requestPermissions = async () => {
-    if (Platform.OS === 'android') {
-      if (Platform.Version >= 31) {
-        try {
-          await PermissionsAndroid.requestMultiple([
-            PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-            PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-            PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-          ]);
-        } catch {
-          // Ignore errors
-        }
-      } else {
-        try {
-          await PermissionsAndroid.request(
-            PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
-          );
-        } catch {
-          // Ignore errors
-        }
-      }
-    }
-  };
-
-  const rssiToPercent = (rssi: number): number => {
-    const minRssi = -100;
-    const maxRssi = -30;
-    const percent = ((rssi - minRssi) / (maxRssi - minRssi)) * 100;
-    return Math.max(0, Math.min(100, Math.round(percent)));
-  };
-
-  const getDeviceName = (device: Device): string => {
-    if (device.name) {
-      return device.name.replace(/^Meshtastic_?/i, '').trim() || 'Рация';
-    }
-    return 'Рация';
-  };
+  // Use shared utility functions from utils/ble.ts
 
   const startScan = () => {
     if (bluetoothState !== State.PoweredOn) {

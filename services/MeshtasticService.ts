@@ -113,36 +113,78 @@ class MeshtasticService {
 
   async connect(device: Device): Promise<void> {
     try {
+      console.log('[MeshtasticService] Starting connect to:', device.id);
+
+      // If connecting to a different device, clean up the old one first
+      if (this.device && this.deviceId && this.deviceId !== device.id) {
+        console.log('[MeshtasticService] Different device, cleaning up old connection first');
+        await this.disconnect();
+      }
+
+      // If already connecting/connected to this device, skip
+      if (this.deviceId === device.id && this._deviceStatus >= DeviceStatusEnum.DeviceConnecting) {
+        console.log('[MeshtasticService] Already connecting/connected to this device, skipping');
+        return;
+      }
+
       this.updateDeviceStatus(DeviceStatusEnum.DeviceConnecting);
       this.deviceId = device.id;
       this.reconnectAttempts = 0;
       this.isReconnecting = false;
 
-      const connectedDevice = await device.connect();
+      // Check if device is already connected (e.g., from HomeScreen.connectToDevice)
+      console.log('[MeshtasticService] Checking if device is already connected...');
+      const alreadyConnected = await device.isConnected();
+
+      let connectedDevice: Device;
+      if (alreadyConnected) {
+        console.log('[MeshtasticService] Device already connected, reusing connection');
+        connectedDevice = device;
+      } else {
+        console.log('[MeshtasticService] Calling device.connect()...');
+        const startTime = Date.now();
+        connectedDevice = await device.connect();
+        console.log('[MeshtasticService] device.connect() done in', Date.now() - startTime, 'ms');
+      }
+
       this.device = connectedDevice;
 
       this.updateDeviceStatus(DeviceStatusEnum.DeviceConnected);
 
+      console.log('[MeshtasticService] Requesting MTU...');
       await connectedDevice.requestMTU(MTU_SIZE);
+      console.log('[MeshtasticService] MTU set');
+
+      console.log('[MeshtasticService] Discovering services...');
       await connectedDevice.discoverAllServicesAndCharacteristics();
+      console.log('[MeshtasticService] Services discovered');
 
       this.updateDeviceStatus(DeviceStatusEnum.DeviceConfiguring);
 
       // Subscribe to FromNum notifications
+      console.log('[MeshtasticService] Subscribing to FromNum notifications...');
       this.monitorSubscription = connectedDevice.monitorCharacteristicForService(
         MESHTASTIC_SERVICE_UUID,
         FROMNUM_UUID,
         async (error) => {
-          if (error) return;
+          if (error) {
+            console.log('[MeshtasticService] FromNum notification error:', error);
+            return;
+          }
           await this.readAllAvailable();
         }
       );
+      console.log('[MeshtasticService] FromNum subscription created');
 
       // Request initial configuration
+      console.log('[MeshtasticService] Requesting config...');
       await this.requestConfig();
+      console.log('[MeshtasticService] Config requested, reading initial data...');
       await this.readInitialData();
+      console.log('[MeshtasticService] Initial data read complete');
 
       this.updateDeviceStatus(DeviceStatusEnum.DeviceConfigured);
+      console.log('[MeshtasticService] Device fully configured!');
 
       // Start polling as fallback and connection monitoring
       this.pollInterval = setInterval(async () => {
@@ -163,13 +205,16 @@ class MeshtasticService {
         }
       }, POLL_INTERVAL_MS);
     } catch (err) {
+      console.log('[MeshtasticService] Connection error:', err);
       const error = err instanceof Error ? err : new Error('Connection failed');
       this.onError.dispatch(error);
 
       // If this was a reconnect attempt, schedule another one
       if (this.isReconnecting) {
+        console.log('[MeshtasticService] Was reconnecting, scheduling next attempt');
         this.scheduleReconnect();
       } else {
+        console.log('[MeshtasticService] Setting status to disconnected');
         this.updateDeviceStatus(DeviceStatusEnum.DeviceDisconnected);
       }
       throw error;
@@ -323,10 +368,13 @@ class MeshtasticService {
   }
 
   async disconnect(): Promise<void> {
+    console.log('[MeshtasticService] disconnect() called, deviceId:', this.deviceId);
+
     this.stopPolling();
     this.stopReconnecting();
 
     if (this.monitorSubscription) {
+      console.log('[MeshtasticService] Removing monitor subscription');
       this.monitorSubscription.remove();
       this.monitorSubscription = null;
     }
@@ -334,11 +382,14 @@ class MeshtasticService {
     if (this.device) {
       try {
         const isConnected = await this.device.isConnected();
+        console.log('[MeshtasticService] Device isConnected:', isConnected);
         if (isConnected) {
+          console.log('[MeshtasticService] Canceling connection...');
           await this.device.cancelConnection();
+          console.log('[MeshtasticService] Connection canceled');
         }
-      } catch {
-        // Ignore disconnect errors
+      } catch (err) {
+        console.log('[MeshtasticService] Disconnect error (ignored):', err);
       }
       this.device = null;
     }
@@ -350,6 +401,7 @@ class MeshtasticService {
     this._deviceConfig = {};
     this._deviceMetadata = {};
     this._myNodeInfo = null;
+    console.log('[MeshtasticService] State cleared, setting status to disconnected');
     this.updateDeviceStatus(DeviceStatusEnum.DeviceDisconnected);
   }
 
@@ -699,6 +751,126 @@ class MeshtasticService {
   }
 
   /**
+   * Add a channel from QR code data
+   * Finds the first available slot and adds the channel there
+   */
+  async addChannelFromQR(
+    name: string,
+    psk: Uint8Array,
+    uplinkEnabled: boolean = false,
+    downlinkEnabled: boolean = false
+  ): Promise<{ success: boolean; channelIndex: number }> {
+    console.log('[MeshtasticService] addChannelFromQR:', name);
+
+    if (!this.device || !this._myNodeNum) {
+      console.log('[MeshtasticService] addChannelFromQR: no device or myNodeNum');
+      return { success: false, channelIndex: -1 };
+    }
+
+    try {
+      // Find first available channel slot (1-7, slot 0 is primary)
+      let targetIndex = -1;
+      for (let i = 1; i <= 7; i++) {
+        const existingChannel = this.channels.get(i);
+        if (!existingChannel || existingChannel.role === ChannelRole.DISABLED) {
+          targetIndex = i;
+          break;
+        }
+      }
+
+      if (targetIndex === -1) {
+        console.log('[MeshtasticService] No available channel slots');
+        this.onError.dispatch(new Error('Все слоты каналов заняты'));
+        return { success: false, channelIndex: -1 };
+      }
+
+      console.log('[MeshtasticService] Using channel slot:', targetIndex);
+
+      const { create, toBinary } = await import('@bufbuild/protobuf');
+      const { Mesh, Admin, Portnums, Channel: ChannelProto } = await import('@meshtastic/protobufs');
+
+      // Create channel settings
+      const channelSettings = create(ChannelProto.ChannelSettingsSchema, {
+        name,
+        psk,
+        uplinkEnabled,
+        downlinkEnabled,
+      });
+
+      // Create channel with SECONDARY role
+      const channel = create(ChannelProto.ChannelSchema, {
+        index: targetIndex,
+        role: ChannelRole.SECONDARY as number,
+        settings: channelSettings,
+      });
+
+      // Create admin message
+      const adminMessage = create(Admin.AdminMessageSchema, {
+        payloadVariant: {
+          case: 'setChannel',
+          value: channel,
+        },
+      });
+
+      // Wrap in data payload
+      const dataPayload = create(Mesh.DataSchema, {
+        portnum: Portnums.PortNum.ADMIN_APP,
+        payload: toBinary(Admin.AdminMessageSchema, adminMessage),
+        wantResponse: true,
+      });
+
+      // Create mesh packet to self
+      const packetId = Math.floor(Math.random() * 0xFFFFFFFF);
+      const meshPacket = create(Mesh.MeshPacketSchema, {
+        to: this._myNodeNum,
+        from: this._myNodeNum,
+        id: packetId,
+        wantAck: true,
+        payloadVariant: {
+          case: 'decoded',
+          value: dataPayload,
+        },
+      });
+
+      // Wrap in ToRadio
+      const toRadio = create(Mesh.ToRadioSchema, {
+        payloadVariant: {
+          case: 'packet',
+          value: meshPacket,
+        },
+      });
+
+      const payload = toBinary(Mesh.ToRadioSchema, toRadio);
+      const base64Payload = btoa(String.fromCharCode.apply(null, Array.from(payload)));
+
+      await this.device.writeCharacteristicWithResponseForService(
+        MESHTASTIC_SERVICE_UUID,
+        TORADIO_UUID,
+        base64Payload
+      );
+
+      // Update local channel state
+      const newChannel: Channel = {
+        index: targetIndex,
+        name,
+        role: ChannelRole.SECONDARY,
+        psk,
+        hasEncryption: psk.length > 0,
+      };
+      this.channels.set(targetIndex, newChannel);
+      this.onChannelPacket.dispatch(newChannel);
+
+      console.log('[MeshtasticService] Channel added successfully at index:', targetIndex);
+      return { success: true, channelIndex: targetIndex };
+    } catch (err) {
+      console.log('[MeshtasticService] addChannelFromQR error:', err);
+      const error = err instanceof Error ? err : new Error('Failed to add channel');
+      this.onError.dispatch(error);
+      return { success: false, channelIndex: -1 };
+    }
+  }
+
+  /**
    * Delete a channel (set role to DISABLED)
    */
   async deleteChannel(index: number): Promise<boolean> {
@@ -869,12 +1041,19 @@ class MeshtasticService {
   }
 
   private async requestConfig(): Promise<void> {
-    if (!this.device) return;
+    console.log('[MeshtasticService] requestConfig starting...');
+    if (!this.device) {
+      console.log('[MeshtasticService] requestConfig: no device, skipping');
+      return;
+    }
 
+    console.log('[MeshtasticService] Importing protobuf...');
     const { create, toBinary } = await import('@bufbuild/protobuf');
     const { Mesh } = await import('@meshtastic/protobufs');
+    console.log('[MeshtasticService] Protobuf imported');
 
     const configId = Math.floor(Date.now() / 1000) % 0xFFFFFFFF;
+    console.log('[MeshtasticService] Creating config request with id:', configId);
     const configRequest = create(Mesh.ToRadioSchema, {
       payloadVariant: {
         case: 'wantConfigId',
@@ -885,29 +1064,39 @@ class MeshtasticService {
     const payload = toBinary(Mesh.ToRadioSchema, configRequest);
     const base64Payload = btoa(String.fromCharCode.apply(null, Array.from(payload)));
 
+    console.log('[MeshtasticService] Writing config request to device...');
     await this.device.writeCharacteristicWithResponseForService(
       MESHTASTIC_SERVICE_UUID,
       TORADIO_UUID,
       base64Payload
     );
+    console.log('[MeshtasticService] Config request sent');
   }
 
   private async readInitialData(): Promise<void> {
+    console.log('[MeshtasticService] readInitialData starting, MAX_EMPTY_READS:', MAX_EMPTY_READS);
     let emptyReads = 0;
+    let totalReads = 0;
 
     while (emptyReads < MAX_EMPTY_READS) {
       try {
         const hasData = await this.readFromRadio();
+        totalReads++;
         if (!hasData) {
           emptyReads++;
+          if (emptyReads % 5 === 0) {
+            console.log('[MeshtasticService] readInitialData: emptyReads =', emptyReads, '/', MAX_EMPTY_READS);
+          }
           await this.delay(INITIAL_READ_DELAY_MS);
         } else {
           emptyReads = 0;
         }
-      } catch {
+      } catch (err) {
+        console.log('[MeshtasticService] readInitialData error:', err);
         break;
       }
     }
+    console.log('[MeshtasticService] readInitialData complete, totalReads:', totalReads);
   }
 
   private async readAllAvailable(): Promise<void> {

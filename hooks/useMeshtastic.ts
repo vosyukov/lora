@@ -32,6 +32,7 @@ export interface UseMeshtasticResult {
   sendMessage: (to: number, text: string) => Promise<Message | null>;
   sendChannelMessage: (text: string, channelIndex: number) => Promise<Message | null>;
   sendLocationMessage: (latitude: number, longitude: number, destination: number | 'broadcast', channelIndex?: number) => Promise<Message | null>;
+  addChannelFromQR: (name: string, psk: Uint8Array, uplinkEnabled?: boolean, downlinkEnabled?: boolean) => Promise<{ success: boolean; channelIndex: number }>;
 
   // Helpers
   getNodeName: (node: NodeInfo) => string;
@@ -65,12 +66,16 @@ export function useMeshtastic(
 
   // Connect to device and subscribe to events
   useEffect(() => {
+    console.log('[useMeshtastic] useEffect triggered, device:', device?.id || 'null');
+
     // Skip if no device (offline mode)
     if (!device) {
+      console.log('[useMeshtastic] No device, setting disconnected status');
       setDeviceStatus(DeviceStatusEnum.DeviceDisconnected);
       return;
     }
 
+    console.log('[useMeshtastic] Setting up subscriptions...');
     const subscriptions = [
       meshtasticService.onDeviceStatus.subscribe(setDeviceStatus),
       meshtasticService.onMyNodeInfo.subscribe((info) => {
@@ -134,9 +139,15 @@ export function useMeshtastic(
     ];
 
     // Connect
-    meshtasticService.connect(device);
+    console.log('[useMeshtastic] Calling meshtasticService.connect...');
+    meshtasticService.connect(device).then(() => {
+      console.log('[useMeshtastic] meshtasticService.connect completed');
+    }).catch((err) => {
+      console.log('[useMeshtastic] meshtasticService.connect error:', err);
+    });
 
     return () => {
+      console.log('[useMeshtastic] Cleanup: unsubscribing and disconnecting');
       subscriptions.forEach((unsub) => unsub());
       meshtasticService.disconnect();
     };
@@ -163,6 +174,15 @@ export function useMeshtastic(
     return meshtasticService.sendLocationMessage(latitude, longitude, destination, channelIndex);
   }, []);
 
+  const addChannelFromQR = useCallback(async (
+    name: string,
+    psk: Uint8Array,
+    uplinkEnabled: boolean = false,
+    downlinkEnabled: boolean = false
+  ): Promise<{ success: boolean; channelIndex: number }> => {
+    return meshtasticService.addChannelFromQR(name, psk, uplinkEnabled, downlinkEnabled);
+  }, []);
+
   const getNodeName = useCallback((node: NodeInfo): string => {
     return node.user?.longName || node.longName || node.shortName || `Node ${node.nodeNum.toString(16).toUpperCase()}`;
   }, []);
@@ -185,6 +205,7 @@ export function useMeshtastic(
     sendMessage,
     sendChannelMessage,
     sendLocationMessage,
+    addChannelFromQR,
     getNodeName,
     isMyNode,
   };

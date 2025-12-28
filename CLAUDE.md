@@ -34,92 +34,105 @@ This is a React Native mobile application built with Expo SDK 54, using TypeScri
 
 **Language**: Russian (primary UI language)
 
-## Key Dependencies
-
-- **react-native-ble-plx**: Core BLE functionality for scanning and connecting to Bluetooth devices
-- **@meshtastic/protobufs**: Meshtastic Protocol Buffer definitions for encoding/decoding messages (v2.7.8)
-- **expo-status-bar**: Status bar management
-- **expo-dev-client**: Development client for Expo
-- **React 19**: Latest React version with new architecture support
-
 ## Development Commands
 
 - `npm start` - Start the Expo development server
 - `npm run android` - Start the app on Android emulator/device
 - `npm run ios` - Start the app on iOS simulator/device
 - `npm run web` - Start the app in web browser
+- `npx tsc --noEmit` - Check TypeScript compilation without building
 
-## EAS Build Configuration
+## Project Structure
 
-The project is configured with EAS (Expo Application Services) for building and distribution:
-
-- **Development**: Uses development client with internal distribution
-- **Preview**: Internal distribution builds
-- **Production**: Auto-increments version numbers
-
-Project ID: `43aedf14-4cab-4a02-be50-53dcee098542`
+```
+/
+├── App.tsx                 # Root component, renders MainScreen
+├── index.ts                # Entry point, registerRootComponent()
+│
+├── screens/
+│   ├── MainScreen.tsx      # Connection management, auto-connect logic
+│   └── DeviceDetailScreen.tsx  # Main app screen with tabs (Chat, Map, Node, Settings)
+│
+├── components/
+│   ├── ScannerModal.tsx    # BLE device scanner wizard
+│   ├── QRScannerModal.tsx  # QR code scanner for channel import
+│   ├── common/             # Shared UI components
+│   │   ├── TopStatusBar.tsx
+│   │   ├── TabBar.tsx
+│   │   └── EmptyState.tsx
+│   └── map/                # Map-related components
+│
+├── hooks/
+│   ├── useMeshtastic.ts    # Main hook for Meshtastic device communication
+│   ├── useStorage.ts       # Persistent storage (friends, messages, settings)
+│   ├── useGps.ts           # GPS location tracking and sending
+│   ├── useOfflineMap.ts    # Offline map tiles management
+│   └── index.ts            # Re-exports all hooks
+│
+├── services/
+│   ├── MeshtasticService.ts    # BLE communication, protobuf encoding/decoding
+│   └── NotificationService.ts  # Push notifications for messages
+│
+├── utils/
+│   ├── ble.ts              # Shared BLE utility functions
+│   └── index.ts            # Re-exports
+│
+├── types/
+│   └── index.ts            # TypeScript type definitions
+│
+└── constants/
+    └── meshtastic.ts       # Constants: UUIDs, colors, storage keys
+```
 
 ## Architecture
 
-The application uses a simple screen-switching architecture:
+### Application Flow
 
-- **Entry point**: `index.ts` registers the root component using `registerRootComponent()`
-- **Root component**: `App.tsx` renders the HomeScreen component
-- **Screens**:
-  - `screens/HomeScreen.tsx` - BLE scanner with Meshtastic device detection
-  - `screens/DeviceDetailScreen.tsx` - Meshtastic device connection and communication
-- **Screen Navigation**: Conditional rendering based on state (no navigation library)
-- **TypeScript**: Strict mode enabled, extends Expo's base tsconfig
+```
+App.tsx
+    └── MainScreen.tsx
+            ├── [loading] → Shows spinner while checking saved device
+            ├── [auto_connecting] → Scanning for previously connected device
+            ├── [offline] → DeviceDetailScreen with device=null
+            └── [connected] → DeviceDetailScreen with connected device
 
-### BLE Implementation
+DeviceDetailScreen.tsx
+    ├── Tab: Chat → Chat list + individual chats
+    ├── Tab: Map → MapLibre with node positions
+    ├── Tab: Node → Device info, telemetry, config
+    └── Tab: Settings → User profile settings
 
-The app uses `react-native-ble-plx` for Bluetooth functionality:
+ScannerModal.tsx (opened from DeviceDetailScreen)
+    └── BLE scanning wizard → on success → connected device
+```
 
-**HomeScreen (Scanner)**:
-- **BLE Manager**: Global singleton instance created at module level
-- **Permissions**: Platform-specific handling (Android 31+ requires BLUETOOTH_SCAN, BLUETOOTH_CONNECT, and ACCESS_FINE_LOCATION)
-- **Scanning**: Device scan runs for 10 seconds by default with automatic deduplication based on device ID
-- **State Management**: React state for devices list, scanning status, and Bluetooth adapter state
-- **Meshtastic Detection**: Devices are identified as Meshtastic by:
-  - Service UUID: `6ba1b218-15a8-461f-9fa8-5dcae273eafd`
-  - Device name containing "meshtastic"
-- **UI Features**: Meshtastic devices are visually highlighted with green background, border, and badge
+### Key Hooks
 
-**DeviceDetailScreen (Connection)**:
-- **Connection Flow**: Following Meshtastic BLE protocol:
-  1. Connect to device
-  2. Set MTU to 512 bytes
-  3. Discover services and characteristics
-  4. Subscribe to FromNum (0xed9da18c-a800-4f66-a670-aa7547e34453) for message notifications
-  5. Send ToRadio.want_config_id to request configuration
-  6. Read FromRadio repeatedly to receive initial data
-- **Message Handling**: Processes FromRadio messages including:
-  - MyNodeInfo - local node information
-  - NodeInfo - mesh network nodes
-  - Config/Channel - device configuration
-  - MeshPacket - text messages, position data, telemetry
-- **Protobuf**: Uses @meshtastic/protobufs for encoding ToRadio and decoding FromRadio messages
-- **Real-time Updates**: Monitors FromNum characteristic for new message notifications
+| Hook | Purpose |
+|------|---------|
+| `useMeshtastic` | Manages Meshtastic device connection, subscribes to events, provides send methods |
+| `useStorage` | Persists friends, messages, last read timestamps, user profile |
+| `useGps` | Tracks device GPS, sends position to mesh network periodically |
+| `useOfflineMap` | Manages offline map tile downloads using MapLibre |
 
-### Platform Configuration
+### Services
 
-**iOS**:
-- Tablet support enabled
-- Bluetooth usage descriptions in `Info.plist` via `app.json`
+| Service | Purpose |
+|---------|---------|
+| `MeshtasticService` | Low-level BLE communication, protobuf encoding/decoding, event emitters |
+| `NotificationService` | Local push notifications for incoming messages |
 
-**Android**:
-- Package name: `com.yourcompany.myapp`
-- Edge-to-edge mode enabled
-- Predictive back gesture disabled
-- Comprehensive Bluetooth permissions for API levels 31+
+## Key Dependencies
 
-**BLE Plugin**:
-- Background mode enabled with both peripheral and central modes
-- Configured via `react-native-ble-plx` Expo plugin in `app.json`
+- **react-native-ble-plx**: Core BLE functionality for scanning and connecting to Bluetooth devices
+- **@meshtastic/protobufs**: Meshtastic Protocol Buffer definitions for encoding/decoding messages (v2.7.8)
+- **@maplibre/maplibre-react-native**: Map rendering with offline support
+- **expo-location**: GPS access
+- **expo-notifications**: Local push notifications
+- **@react-native-async-storage/async-storage**: Persistent storage
+- **React 19**: Latest React version with new architecture support
 
 ## Meshtastic Protocol
-
-This application is designed to communicate with Meshtastic mesh network devices. Key integration points:
 
 ### Bluetooth Service
 
@@ -127,15 +140,6 @@ This application is designed to communicate with Meshtastic mesh network devices
 - **ToRadio UUID**: `f75c76d2-129e-4dad-a1dd-7866124401e7` (Write)
 - **FromRadio UUID**: `2c55e69e-4993-11ed-b878-0242ac120002` (Read)
 - **FromNum UUID**: `ed9da18c-a800-4f66-a670-aa7547e34453` (Read/Notify)
-
-### Protocol Buffers
-
-The application uses Meshtastic protobuf definitions for all communication:
-
-- **ToRadio**: Commands/packets sent to device
-- **FromRadio**: Responses/packets from device
-- **MeshPacket**: Envelope for mesh network packets
-- **Data**: Actual payload with portnum-specific content
 
 ### Connection Flow
 
@@ -150,10 +154,92 @@ The application uses Meshtastic protobuf definitions for all communication:
 
 For detailed information about protobuf structures, message types, and API usage, refer to [MESHTASTIC_API.md](./MESHTASTIC_API.md).
 
+## Coding Guidelines
+
+### Adding New Features
+
+1. **New UI component**: Add to `components/` with appropriate subdirectory
+2. **New business logic**: Create a hook in `hooks/` or extend existing service
+3. **New constants**: Add to `constants/meshtastic.ts`
+4. **New types**: Add to `types/index.ts`
+
+### Styling
+
+- Use `COLORS` from `constants/meshtastic.ts` for consistent theming
+- Telegram-inspired color palette (primary: `#2AABEE`)
+- Russian language for all user-facing text
+
+### BLE Utilities
+
+Use shared utilities from `utils/ble.ts`:
+- `rssiToPercent(rssi)` - Convert RSSI to 0-100 percentage
+- `getDeviceName(device)` - Clean device name, removes "Meshtastic_" prefix
+- `requestBlePermissions()` - Request Android BLE permissions
+
+### State Management
+
+- Local component state for UI
+- Hooks for domain logic (`useMeshtastic`, `useStorage`, etc.)
+- `MeshtasticService` singleton for BLE connection management
+
+## Future Improvements (TODO)
+
+### Refactoring Candidates
+
+1. **DeviceDetailScreen.tsx** (~1700 lines) - Should be split into:
+   - `screens/tabs/ChatTab.tsx`
+   - `screens/tabs/MapTab.tsx`
+   - `screens/tabs/NodeTab.tsx`
+   - `screens/tabs/SettingsTab.tsx`
+
+2. **Create shared components**:
+   - `components/common/NodeAvatar.tsx`
+   - `components/common/StatusBadge.tsx`
+   - `components/chat/MessageBubble.tsx`
+   - `components/chat/ChatListItem.tsx`
+
+3. **Add code quality tools**:
+   - ESLint with React Native config
+   - Prettier for consistent formatting
+   - Husky for pre-commit hooks
+
+### Missing Features
+
+- [ ] Message delivery confirmation UI
+- [ ] Node last seen timestamp display
+- [ ] Channel QR code generation
+- [ ] Device settings editing
+- [ ] Message search
+
+## EAS Build Configuration
+
+The project is configured with EAS (Expo Application Services) for building and distribution:
+
+- **Development**: Uses development client with internal distribution
+- **Preview**: Internal distribution builds
+- **Production**: Auto-increments version numbers
+
+Project ID: `43aedf14-4cab-4a02-be50-53dcee098542`
+
+## Platform Configuration
+
+**iOS**:
+- Tablet support enabled
+- Bluetooth usage descriptions in `Info.plist` via `app.json`
+
+**Android**:
+- Package name: `com.yourcompany.myapp`
+- Edge-to-edge mode enabled
+- Comprehensive Bluetooth permissions for API levels 31+
+
+**BLE Plugin**:
+- Background mode enabled with both peripheral and central modes
+- Configured via `react-native-ble-plx` Expo plugin in `app.json`
+
 ## Important Notes
 
-- The BLE manager instance is created at module level and cleaned up in the component's useEffect cleanup
-- Bluetooth state changes are monitored via subscription
-- Device list automatically deduplicates by device ID and updates RSSI values for existing devices
-- Scanning requires Bluetooth to be powered on and appropriate permissions granted
-- When connecting to Meshtastic devices, filter by service UUID `6ba1b218-15a8-461f-9fa8-5dcae273eafd` for efficiency
+- BLE manager is created at module level in MainScreen and cleaned up in useEffect
+- Auto-reconnect logic tries to find previously connected device on app start
+- Offline mode works without device connection (view cached messages)
+- GPS position is sent to mesh every 5 minutes when connected
+- Messages are persisted locally (up to 500 messages)

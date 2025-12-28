@@ -35,15 +35,30 @@ export const GPS_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 export const MAP_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
 export const OFFLINE_PACK_NAME = 'meshNetwork';
 
-// UI Colors
+// UI Colors (Telegram-inspired palette)
 export const COLORS = {
+  // Brand colors
   primary: '#2AABEE',
+  primaryDark: '#229ED9',
+
+  // Status colors
   success: '#31B545',
   warning: '#FF9500',
   error: '#FF3B30',
+
+  // Text colors
+  text: '#000000',
   textPrimary: '#000000',
   textSecondary: '#8E8E93',
-  background: '#F8F8F8',
+  textHint: '#999999',
+
+  // Background colors
+  background: '#FFFFFF',
+  backgroundGray: '#F4F4F5',
+  cardBackground: '#FFFFFF',
+
+  // Other
   border: '#E5E5EA',
   white: '#FFFFFF',
+  overlay: 'rgba(0, 0, 0, 0.5)',
 } as const;
