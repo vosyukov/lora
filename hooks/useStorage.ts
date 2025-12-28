@@ -6,6 +6,7 @@ import {
   MESSAGES_STORAGE_KEY,
   LAST_READ_STORAGE_KEY,
   USER_NAME_KEY,
+  USER_PHONE_KEY,
   MAX_STORED_MESSAGES,
 } from '../constants/meshtastic';
 
@@ -26,9 +27,11 @@ export interface UseStorageResult {
   markChatAsRead: (chatKey: string) => void;
   getUnreadCount: (chatKey: string, chatMessages: Message[]) => number;
 
-  // User name
+  // User profile
   userName: string | null;
   setUserName: (name: string) => Promise<void>;
+  userPhone: string | null;
+  setUserPhone: (phone: string) => Promise<void>;
 }
 
 export function useStorage(): UseStorageResult {
@@ -36,6 +39,7 @@ export function useStorage(): UseStorageResult {
   const [messages, setMessages] = useState<Message[]>([]);
   const [lastReadTimestamps, setLastReadTimestamps] = useState<Record<string, number>>({});
   const [userName, setUserNameState] = useState<string | null>(null);
+  const [userPhone, setUserPhoneState] = useState<string | null>(null);
 
   // Load all data on mount
   useEffect(() => {
@@ -43,6 +47,7 @@ export function useStorage(): UseStorageResult {
     loadMessages();
     loadLastRead();
     loadUserName();
+    loadUserPhone();
   }, []);
 
   // Friends
@@ -185,6 +190,27 @@ export function useStorage(): UseStorageResult {
     }
   }, []);
 
+  // User phone
+  const loadUserPhone = async () => {
+    try {
+      const stored = await AsyncStorage.getItem(USER_PHONE_KEY);
+      if (stored) {
+        setUserPhoneState(stored);
+      }
+    } catch {
+      // Ignore load errors
+    }
+  };
+
+  const setUserPhone = useCallback(async (phone: string) => {
+    try {
+      await AsyncStorage.setItem(USER_PHONE_KEY, phone);
+      setUserPhoneState(phone);
+    } catch {
+      // Ignore save errors
+    }
+  }, []);
+
   return {
     friendIds,
     addFriend,
@@ -198,5 +224,7 @@ export function useStorage(): UseStorageResult {
     getUnreadCount,
     userName,
     setUserName,
+    userPhone,
+    setUserPhone,
   };
 }

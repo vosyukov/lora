@@ -12,7 +12,6 @@ import {
   Modal,
   Share,
   Keyboard,
-  Switch,
   ActivityIndicator,
   StatusBar,
 } from 'react-native';
@@ -62,6 +61,8 @@ export default function DeviceDetailScreen({
     getUnreadCount,
     userName,
     setUserName: saveUserName,
+    userPhone,
+    setUserPhone: saveUserPhone,
   } = useStorage();
 
   // Message handler for useMeshtastic
@@ -94,12 +95,7 @@ export default function DeviceDetailScreen({
   } = useMeshtastic(device, handleIncomingMessage, handleAck);
 
   // GPS hook
-  const {
-    gpsEnabled,
-    currentLocation,
-    lastGpsSent,
-    toggleGps,
-  } = useGps(deviceStatus === DeviceStatusEnum.DeviceConfigured);
+  const { currentLocation } = useGps(deviceStatus === DeviceStatusEnum.DeviceConfigured);
 
   // Offline map hook
   const {
@@ -121,6 +117,10 @@ export default function DeviceDetailScreen({
   const [shareChannelUrl, setShareChannelUrl] = useState<string | null>(null);
   const [showNameModal, setShowNameModal] = useState(false);
   const [nameInput, setNameInput] = useState('');
+  const [phoneInput, setPhoneInput] = useState('');
+  const [isEditingPhone, setIsEditingPhone] = useState(false);
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [editNameInput, setEditNameInput] = useState('');
 
   const scrollViewRef = useRef<ScrollView>(null);
   const mapRef = useRef<MapLibreGL.MapViewRef>(null);
@@ -257,7 +257,7 @@ export default function DeviceDetailScreen({
     const key = getChatKey(target);
     const targetMessages = target.type === 'dm'
       ? messages.filter(m => m.from === target.id && m.to === myNodeNum && !m.isOutgoing)
-      : messages.filter(m => m.channel === target.id && !m.isOutgoing);
+      : messages.filter(m => m.channel === target.id && m.to === BROADCAST_ADDR && !m.isOutgoing);
     return getUnreadCount(key, targetMessages);
   };
 
@@ -464,8 +464,8 @@ export default function DeviceDetailScreen({
   };
 
   const renderChannelItem = (channel: Channel) => {
-    // Get last message for this channel
-    const channelMessages = messages.filter(m => m.channel === channel.index);
+    // Get last message for this channel (only broadcast messages, not DMs)
+    const channelMessages = messages.filter(m => m.channel === channel.index && m.to === BROADCAST_ADDR);
     const lastMessage = channelMessages.length > 0
       ? channelMessages[channelMessages.length - 1]
       : null;
@@ -905,6 +905,37 @@ export default function DeviceDetailScreen({
 
     return (
       <ScrollView style={styles.nodesList} showsVerticalScrollIndicator={false}>
+        {/* Radio Connection */}
+        <Text style={styles.sectionHeader}>ПОДКЛЮЧЕНИЕ</Text>
+        <View style={styles.nodeStatusCard}>
+          <View style={styles.nodeStatusRow}>
+            <Text style={styles.nodeStatusLabel}>Статус</Text>
+            <View style={styles.connectionStatusContainer}>
+              <View style={[
+                styles.connectionStatusDot,
+                { backgroundColor: isOffline || !device ? '#FF9500' : '#31B545' }
+              ]} />
+              <Text style={[
+                styles.nodeStatusValue,
+                { color: isOffline || !device ? '#FF9500' : '#31B545' }
+              ]}>
+                {isOffline || !device ? 'Не подключена' : 'Подключена'}
+              </Text>
+            </View>
+          </View>
+          {onOpenScanner && (
+            <TouchableOpacity
+              style={styles.settingsButton}
+              onPress={onOpenScanner}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.settingsButtonText}>
+                {isOffline || !device ? 'Подключить рацию' : 'Подключить другую рацию'}
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
         {/* Device Info */}
         <Text style={styles.sectionHeader}>УСТРОЙСТВО</Text>
         <View style={styles.nodeStatusCard}>
@@ -1256,98 +1287,94 @@ export default function DeviceDetailScreen({
   const renderSettingsTab = () => {
     return (
       <ScrollView style={styles.nodesList} showsVerticalScrollIndicator={false}>
-        {/* Radio Connection */}
-        <Text style={styles.sectionHeader}>РАЦИЯ</Text>
-        <View style={styles.nodeStatusCard}>
-          <View style={styles.nodeStatusRow}>
-            <Text style={styles.nodeStatusLabel}>Статус</Text>
-            <View style={styles.connectionStatusContainer}>
-              <View style={[
-                styles.connectionStatusDot,
-                { backgroundColor: isOffline || !device ? '#FF9500' : '#31B545' }
-              ]} />
-              <Text style={[
-                styles.nodeStatusValue,
-                { color: isOffline || !device ? '#FF9500' : '#31B545' }
-              ]}>
-                {isOffline || !device ? 'Не подключена' : 'Подключена'}
-              </Text>
-            </View>
-          </View>
-          {onOpenScanner && (
-            <TouchableOpacity
-              style={styles.settingsButton}
-              onPress={onOpenScanner}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.settingsButtonText}>
-                {isOffline || !device ? 'Подключить рацию' : 'Подключить другую рацию'}
-              </Text>
-            </TouchableOpacity>
-          )}
-        </View>
-
-        {/* GPS Settings */}
-        <Text style={styles.sectionHeader}>ГЕОЛОКАЦИЯ</Text>
-        <View style={styles.nodeStatusCard}>
-          <View style={styles.nodeStatusRow}>
-            <View style={styles.gpsLabelContainer}>
-              <Text style={styles.nodeStatusLabel}>Передавать позицию</Text>
-              <Text style={styles.gpsHint}>
-                Друзья увидят вас на карте
-              </Text>
-            </View>
-            <Switch
-              value={gpsEnabled}
-              onValueChange={toggleGps}
-              trackColor={{ false: '#E5E5EA', true: '#31B545' }}
-              thumbColor="#FFFFFF"
-            />
-          </View>
-          {gpsEnabled && currentLocation && (
-            <>
-              <View style={styles.nodeStatusRow}>
-                <Text style={styles.nodeStatusLabel}>Координаты</Text>
-                <Text style={styles.nodeStatusValue}>
-                  {currentLocation.latitude.toFixed(5)}, {currentLocation.longitude.toFixed(5)}
-                </Text>
-              </View>
-              {lastGpsSent && (
-                <View style={styles.nodeStatusRow}>
-                  <Text style={styles.nodeStatusLabel}>Отправлено</Text>
-                  <Text style={styles.nodeStatusValue}>
-                    {formatTime(lastGpsSent)}
-                  </Text>
-                </View>
-              )}
-            </>
-          )}
-          {gpsEnabled && !currentLocation && (
-            <View style={styles.nodeStatusRow}>
-              <Text style={styles.nodeStatusLabel}>Статус</Text>
-              <Text style={styles.nodeStatusValue}>Определение...</Text>
-            </View>
-          )}
-        </View>
-
         {/* Profile */}
-        {userName && (
-          <>
-            <Text style={styles.sectionHeader}>ПРОФИЛЬ</Text>
-            <View style={styles.nodeStatusCard}>
-              <View style={styles.nodeStatusRow}>
-                <Text style={styles.nodeStatusLabel}>Имя</Text>
-                <Text style={styles.nodeStatusValue}>{userName}</Text>
+        <Text style={styles.sectionHeader}>ПРОФИЛЬ</Text>
+        <View style={styles.nodeStatusCard}>
+          <View style={styles.nodeStatusRow}>
+            <Text style={styles.nodeStatusLabel}>Имя</Text>
+            {isEditingName ? (
+              <View style={styles.phoneInputContainer}>
+                <TextInput
+                  style={styles.phoneInput}
+                  value={editNameInput}
+                  onChangeText={setEditNameInput}
+                  placeholder="Ваше имя"
+                  placeholderTextColor="#8E8E93"
+                  autoFocus
+                />
+                <TouchableOpacity
+                  style={styles.phoneSaveButton}
+                  onPress={async () => {
+                    const name = editNameInput.trim();
+                    if (name) {
+                      const shortName = meshtasticService.generateShortName(name);
+                      const success = await meshtasticService.setOwner(name, shortName);
+                      if (success) {
+                        await saveUserName(name);
+                      } else {
+                        Alert.alert('Ошибка', 'Не удалось сохранить имя на рацию. Проверьте подключение.');
+                      }
+                    }
+                    setIsEditingName(false);
+                  }}
+                >
+                  <Text style={styles.phoneSaveButtonText}>OK</Text>
+                </TouchableOpacity>
               </View>
-              <View style={styles.nodeStatusRow}>
-                <Text style={styles.nodeStatusLabel}>Короткое имя</Text>
-                <Text style={styles.nodeStatusValue}>
-                  {meshtasticService.generateShortName(userName)}
+            ) : (
+              <TouchableOpacity
+                style={styles.editableField}
+                onPress={() => {
+                  setEditNameInput(userName || '');
+                  setIsEditingName(true);
+                }}
+              >
+                <Text style={[styles.nodeStatusValue, !userName && styles.phoneEmpty]}>
+                  {userName || 'Добавить'}
                 </Text>
+                <Text style={styles.editIcon}>✎</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          <View style={styles.nodeStatusRow}>
+            <Text style={styles.nodeStatusLabel}>Телефон</Text>
+            {isEditingPhone ? (
+              <View style={styles.phoneInputContainer}>
+                <TextInput
+                  style={styles.phoneInput}
+                  value={phoneInput}
+                  onChangeText={setPhoneInput}
+                  placeholder="+7 999 123-45-67"
+                  placeholderTextColor="#8E8E93"
+                  keyboardType="phone-pad"
+                  autoFocus
+                />
+                <TouchableOpacity
+                  style={styles.phoneSaveButton}
+                  onPress={() => {
+                    saveUserPhone(phoneInput.trim());
+                    setIsEditingPhone(false);
+                  }}
+                >
+                  <Text style={styles.phoneSaveButtonText}>OK</Text>
+                </TouchableOpacity>
               </View>
-            </View>
-          </>
-        )}
+            ) : (
+              <TouchableOpacity
+                style={styles.editableField}
+                onPress={() => {
+                  setPhoneInput(userPhone || '');
+                  setIsEditingPhone(true);
+                }}
+              >
+                <Text style={[styles.nodeStatusValue, !userPhone && styles.phoneEmpty]}>
+                  {userPhone || 'Добавить'}
+                </Text>
+                <Text style={styles.editIcon}>✎</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
 
         {/* About */}
         <Text style={styles.sectionHeader}>О ПРИЛОЖЕНИИ</Text>
@@ -2481,6 +2508,46 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#8E8E93',
     marginBottom: 20,
+  },
+  phoneInputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'flex-end',
+  },
+  phoneInput: {
+    backgroundColor: '#F4F4F5',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    fontSize: 15,
+    color: '#000000',
+    minWidth: 140,
+    textAlign: 'right',
+  },
+  phoneSaveButton: {
+    marginLeft: 8,
+    backgroundColor: '#2AABEE',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  phoneSaveButtonText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  phoneEmpty: {
+    color: '#2AABEE',
+  },
+  editableField: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  editIcon: {
+    marginLeft: 6,
+    fontSize: 14,
+    color: '#8E8E93',
   },
   modalButton: {
     backgroundColor: '#2AABEE',

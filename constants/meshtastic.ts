@@ -24,6 +24,7 @@ export const MESSAGES_STORAGE_KEY = '@messages';
 export const LAST_DEVICE_KEY = '@last_device';
 export const LAST_READ_STORAGE_KEY = '@last_read';
 export const USER_NAME_KEY = '@user_name';
+export const USER_PHONE_KEY = '@user_phone';
 export const GPS_ENABLED_KEY = '@gps_enabled';
 export const MAX_STORED_MESSAGES = 500;
 
