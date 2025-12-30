@@ -61,7 +61,8 @@
         {
           "locationWhenInUsePermission": "Allow $(PRODUCT_NAME) to use your location to share your position with friends."
         }
-      ]
+      ],
+      "expo-sqlite"
     ],
     "extra": {
       "eas": {

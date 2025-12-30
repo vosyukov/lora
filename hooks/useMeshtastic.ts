@@ -218,11 +218,17 @@ export function useMeshtastic(
   }, []);
 
   const sendMessage = useCallback(async (to: number, text: string): Promise<Message | null> => {
-    return meshtasticService.sendMessage(to, text);
+    logger.debug('useMeshtastic', 'sendMessage called:', { to, textLength: text.length });
+    const result = await meshtasticService.sendMessage(to, text);
+    logger.debug('useMeshtastic', 'sendMessage result:', result ? { id: result.id, packetId: result.packetId } : 'null');
+    return result;
   }, []);
 
   const sendChannelMessage = useCallback(async (text: string, channelIndex: number): Promise<Message | null> => {
-    return meshtasticService.sendText(text, 'broadcast', channelIndex);
+    logger.debug('useMeshtastic', 'sendChannelMessage called:', { channelIndex, textLength: text.length });
+    const result = await meshtasticService.sendText(text, 'broadcast', channelIndex);
+    logger.debug('useMeshtastic', 'sendChannelMessage result:', result ? { id: result.id, packetId: result.packetId } : 'null');
+    return result;
   }, []);
 
   const sendLocationMessage = useCallback(async (

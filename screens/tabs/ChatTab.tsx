@@ -19,6 +19,7 @@ import { BROADCAST_ADDR } from '../../constants/meshtastic';
 import { sharedStyles, chatStyles } from './styles';
 import type { ChatTabProps } from './types';
 import { MessageBubble, ChatListItem } from '../../components/chat';
+import { logger } from '../../services/LoggerService';
 
 export default function ChatTab({
   myNodeNum,
@@ -203,15 +204,30 @@ export default function ChatTab({
 
   // Handlers
   const handleSendMessage = async () => {
-    if (!openChat || !messageText.trim()) return;
+    logger.debug('ChatTab', 'handleSendMessage called:', {
+      hasOpenChat: !!openChat,
+      openChatType: openChat?.type,
+      openChatId: openChat?.id,
+      messageText: messageText.substring(0, 50),
+      messageLength: messageText.length,
+    });
+
+    if (!openChat || !messageText.trim()) {
+      logger.debug('ChatTab', 'handleSendMessage ABORT: no openChat or empty text');
+      return;
+    }
 
     let sentMessage: Message | null;
 
     if (openChat.type === 'dm') {
+      logger.debug('ChatTab', 'handleSendMessage: sending DM to', openChat.id);
       sentMessage = await sendMessage(openChat.id, messageText);
     } else {
+      logger.debug('ChatTab', 'handleSendMessage: sending channel message to channel', openChat.id);
       sentMessage = await sendChannelMessage(messageText, openChat.id);
     }
+
+    logger.debug('ChatTab', 'handleSendMessage result:', sentMessage ? { id: sentMessage.id, packetId: sentMessage.packetId } : 'null');
 
     if (sentMessage) {
       addMessage(sentMessage);
@@ -220,6 +236,7 @@ export default function ChatTab({
         scrollViewRef.current?.scrollToEnd({ animated: true });
       }, 100);
     } else {
+      logger.debug('ChatTab', 'handleSendMessage FAILED: showing error alert');
       Alert.alert('Error', 'Failed to send message');
     }
   };

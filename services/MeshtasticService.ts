@@ -446,15 +446,36 @@ class MeshtasticService {
     channel: number = 0,
     wantAck: boolean = true
   ): Promise<Message | null> {
-    if (!this.device || !this._myNodeNum || !text.trim()) {
+    logger.debug('MeshtasticService', 'sendText called:', {
+      text: text.substring(0, 50),
+      destination,
+      channel,
+      wantAck,
+      hasDevice: !!this.device,
+      myNodeNum: this._myNodeNum,
+    });
+
+    if (!this.device) {
+      logger.debug('MeshtasticService', 'sendText FAILED: no device');
+      return null;
+    }
+    if (!this._myNodeNum) {
+      logger.debug('MeshtasticService', 'sendText FAILED: no myNodeNum');
+      return null;
+    }
+    if (!text.trim()) {
+      logger.debug('MeshtasticService', 'sendText FAILED: empty text');
       return null;
     }
 
     const to = destination === 'broadcast' ? BROADCAST_ADDR : destination;
+    logger.debug('MeshtasticService', 'sendText destination resolved:', { to, isBroadcast: to === BROADCAST_ADDR });
 
     try {
+      logger.debug('MeshtasticService', 'sendText importing protobuf...');
       const { create, toBinary } = await import('@bufbuild/protobuf');
       const { Mesh, Portnums } = await import('@meshtastic/protobufs');
+      logger.debug('MeshtasticService', 'sendText protobuf imported');
 
       const dataPayload = create(Mesh.DataSchema, {
         portnum: Portnums.PortNum.TEXT_MESSAGE_APP,
@@ -462,6 +483,13 @@ class MeshtasticService {
       });
 
       const packetId = Math.floor(Math.random() * 0xFFFFFFFF);
+      logger.debug('MeshtasticService', 'sendText creating MeshPacket:', {
+        packetId,
+        to,
+        from: this._myNodeNum,
+        channel,
+      });
+
       const meshPacket = create(Mesh.MeshPacketSchema, {
         to,
         from: this._myNodeNum,
@@ -483,12 +511,15 @@ class MeshtasticService {
 
       const payload = toBinary(Mesh.ToRadioSchema, toRadio);
       const base64Payload = btoa(String.fromCharCode.apply(null, Array.from(payload)));
+      logger.debug('MeshtasticService', 'sendText payload ready, size:', payload.length);
 
+      logger.debug('MeshtasticService', 'sendText writing to BLE characteristic...');
       await this.device.writeCharacteristicWithResponseForService(
         MESHTASTIC_SERVICE_UUID,
         TORADIO_UUID,
         base64Payload
       );
+      logger.debug('MeshtasticService', 'sendText BLE write SUCCESS');
 
       const message: Message = {
         id: `${this._myNodeNum}-${Date.now()}`,
@@ -502,8 +533,14 @@ class MeshtasticService {
         status: 'sent', // Sent to device, waiting for ACK
       };
 
+      logger.debug('MeshtasticService', 'sendText completed, message:', {
+        id: message.id,
+        packetId: message.packetId,
+      });
+
       return message;
     } catch (err) {
+      logger.debug('MeshtasticService', 'sendText ERROR:', err);
       const error = err instanceof Error ? err : new Error('Failed to send message');
       this.onError.dispatch(error);
       return null;

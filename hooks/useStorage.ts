@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { Message, MqttSettings } from '../types';
 import {
@@ -8,8 +8,10 @@ import {
   USER_NAME_KEY,
   USER_PHONE_KEY,
   MQTT_SETTINGS_KEY,
-  MAX_STORED_MESSAGES,
 } from '../constants/meshtastic';
+import { databaseService } from '../services/DatabaseService';
+
+const MIGRATION_DONE_KEY = '@meshtastic/migration_done';
 
 // Default MQTT settings (HiveMQ Cloud)
 const DEFAULT_MQTT_SETTINGS: MqttSettings = {
@@ -58,16 +60,71 @@ export function useStorage(): UseStorageResult {
   const [userName, setUserNameState] = useState<string | null>(null);
   const [userPhone, setUserPhoneState] = useState<string | null>(null);
   const [mqttSettings, setMqttSettingsState] = useState<MqttSettings>(DEFAULT_MQTT_SETTINGS);
+  const dbInitialized = useRef(false);
 
   // Load all data on mount
   useEffect(() => {
     loadFriends();
-    loadMessages();
+    initDatabaseAndLoadMessages();
     loadLastRead();
     loadUserName();
     loadUserPhone();
     loadMqttSettings();
   }, []);
+
+  // Initialize database and migrate from AsyncStorage if needed
+  const initDatabaseAndLoadMessages = async () => {
+    try {
+      await databaseService.init();
+      dbInitialized.current = true;
+
+      // Check if migration is needed
+      const migrationDone = await AsyncStorage.getItem(MIGRATION_DONE_KEY);
+      if (!migrationDone) {
+        await migrateFromAsyncStorage();
+      }
+
+      // Load messages from SQLite
+      const dbMessages = await databaseService.getMessages(500);
+      setMessages(dbMessages);
+    } catch (error) {
+      console.error('Failed to initialize database:', error);
+      // Fallback to AsyncStorage
+      loadMessagesFromAsyncStorage();
+    }
+  };
+
+  // Migrate messages from AsyncStorage to SQLite
+  const migrateFromAsyncStorage = async () => {
+    try {
+      const stored = await AsyncStorage.getItem(MESSAGES_STORAGE_KEY);
+      if (stored) {
+        const oldMessages = JSON.parse(stored) as Message[];
+        if (oldMessages.length > 0) {
+          await databaseService.importMessages(oldMessages);
+          console.log(`Migrated ${oldMessages.length} messages to SQLite`);
+        }
+      }
+      // Mark migration as done
+      await AsyncStorage.setItem(MIGRATION_DONE_KEY, 'true');
+      // Clean up old messages from AsyncStorage
+      await AsyncStorage.removeItem(MESSAGES_STORAGE_KEY);
+    } catch (error) {
+      console.error('Migration failed:', error);
+    }
+  };
+
+  // Fallback: load messages from AsyncStorage
+  const loadMessagesFromAsyncStorage = async () => {
+    try {
+      const stored = await AsyncStorage.getItem(MESSAGES_STORAGE_KEY);
+      if (stored) {
+        setMessages(JSON.parse(stored));
+      }
+    } catch {
+      // Ignore load errors
+    }
+  };
 
   // Friends
   const loadFriends = async () => {
@@ -112,30 +169,11 @@ export function useStorage(): UseStorageResult {
     return friendIds.has(nodeNum);
   }, [friendIds]);
 
-  // Messages
-  const loadMessages = async () => {
-    try {
-      const stored = await AsyncStorage.getItem(MESSAGES_STORAGE_KEY);
-      if (stored) {
-        setMessages(JSON.parse(stored));
-      }
-    } catch {
-      // Ignore load errors
-    }
-  };
-
-  const saveMessages = async (msgs: Message[]) => {
-    try {
-      const toStore = msgs.slice(-MAX_STORED_MESSAGES);
-      await AsyncStorage.setItem(MESSAGES_STORAGE_KEY, JSON.stringify(toStore));
-    } catch {
-      // Ignore save errors
-    }
-  };
-
+  // Messages (SQLite)
   const addMessage = useCallback((message: Message) => {
+    // Optimistic update for UI
     setMessages(prev => {
-      // Check for duplicates
+      // Check for duplicates in current state
       const isDuplicate = prev.some(
         m => m.from === message.from &&
           m.to === message.to &&
@@ -144,23 +182,35 @@ export function useStorage(): UseStorageResult {
       );
 
       if (isDuplicate) return prev;
-
-      const updated = [...prev, message];
-      saveMessages(updated);
-      return updated;
+      return [...prev, message];
     });
+
+    // Persist to SQLite
+    if (dbInitialized.current) {
+      databaseService.addMessage(message).catch(error => {
+        console.error('Failed to save message to SQLite:', error);
+      });
+    }
   }, []);
 
   const updateMessageStatus = useCallback((packetId: number, success: boolean) => {
-    setMessages(prev => {
-      const updated: Message[] = prev.map(m =>
+    const status = success ? 'delivered' : 'failed';
+
+    // Optimistic update for UI
+    setMessages(prev =>
+      prev.map(m =>
         m.packetId === packetId
-          ? { ...m, status: (success ? 'delivered' : 'failed') as Message['status'] }
+          ? { ...m, status: status as Message['status'] }
           : m
-      );
-      saveMessages(updated);
-      return updated;
-    });
+      )
+    );
+
+    // Persist to SQLite
+    if (dbInitialized.current) {
+      databaseService.updateMessageStatus(packetId, status).catch(error => {
+        console.error('Failed to update message status in SQLite:', error);
+      });
+    }
   }, []);
 
   // Last read timestamps
