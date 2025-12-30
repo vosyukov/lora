@@ -15,11 +15,14 @@ function StatusIcon({ status, isOutgoing }: { status?: MessageStatus; isOutgoing
   if (!isOutgoing) return null;
 
   switch (status) {
+    case 'pending':
+      return <Text style={[chatStyles.statusIcon, chatStyles.statusPending]}>◷</Text>;
+    case 'sent':
+      return <Text style={chatStyles.statusIcon}>✓</Text>;
     case 'delivered':
-      return <Text style={chatStyles.statusIcon}>✓✓</Text>;
+      return <Text style={[chatStyles.statusIcon, chatStyles.statusDelivered]}>✓✓</Text>;
     case 'failed':
       return <Text style={[chatStyles.statusIcon, chatStyles.statusFailed]}>!</Text>;
-    case 'sent':
     default:
       return <Text style={chatStyles.statusIcon}>✓</Text>;
   }

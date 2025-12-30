@@ -86,7 +86,7 @@ export default function DeviceDetailScreen({
 
   // ACK handler for useMeshtastic
   const handleAck = useCallback((packetId: number, success: boolean) => {
-    updateMessageStatus(packetId, success);
+    updateMessageStatus(packetId, success ? 'delivered' : 'failed');
   }, [updateMessageStatus]);
 
   // Meshtastic hook
@@ -378,6 +378,7 @@ export default function DeviceDetailScreen({
           sendChannelMessage={sendChannelMessage}
           sendLocationMessage={sendLocationMessage}
           addMessage={addMessage}
+          updateMessageStatus={updateMessageStatus}
           addFriend={addFriend}
           removeFriend={removeFriend}
           markChatAsRead={markChatAsRead}

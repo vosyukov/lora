@@ -26,9 +26,9 @@ export interface UseMeshtasticResult {
 
   // Actions
   disconnect: () => void;
-  sendMessage: (to: number, text: string) => Promise<Message | null>;
-  sendChannelMessage: (text: string, channelIndex: number) => Promise<Message | null>;
-  sendLocationMessage: (latitude: number, longitude: number, destination: number | 'broadcast', channelIndex?: number) => Promise<Message | null>;
+  sendMessage: (to: number, text: string, packetId?: number) => Promise<Message | null>;
+  sendChannelMessage: (text: string, channelIndex: number, packetId?: number) => Promise<Message | null>;
+  sendLocationMessage: (latitude: number, longitude: number, destination: number | 'broadcast', channelIndex?: number, packetId?: number) => Promise<Message | null>;
   addChannelFromQR: (name: string, psk: Uint8Array, uplinkEnabled?: boolean, downlinkEnabled?: boolean) => Promise<{ success: boolean; channelIndex: number }>;
   setMqttConfig: (settings: MqttSettings) => Promise<boolean>;
 
@@ -217,16 +217,16 @@ export function useMeshtastic(
     meshtasticService.disconnect();
   }, []);
 
-  const sendMessage = useCallback(async (to: number, text: string): Promise<Message | null> => {
-    logger.debug('useMeshtastic', 'sendMessage called:', { to, textLength: text.length });
-    const result = await meshtasticService.sendMessage(to, text);
+  const sendMessage = useCallback(async (to: number, text: string, packetId?: number): Promise<Message | null> => {
+    logger.debug('useMeshtastic', 'sendMessage called:', { to, textLength: text.length, packetId });
+    const result = await meshtasticService.sendText(text, to, 0, true, packetId);
     logger.debug('useMeshtastic', 'sendMessage result:', result ? { id: result.id, packetId: result.packetId } : 'null');
     return result;
   }, []);
 
-  const sendChannelMessage = useCallback(async (text: string, channelIndex: number): Promise<Message | null> => {
-    logger.debug('useMeshtastic', 'sendChannelMessage called:', { channelIndex, textLength: text.length });
-    const result = await meshtasticService.sendText(text, 'broadcast', channelIndex);
+  const sendChannelMessage = useCallback(async (text: string, channelIndex: number, packetId?: number): Promise<Message | null> => {
+    logger.debug('useMeshtastic', 'sendChannelMessage called:', { channelIndex, textLength: text.length, packetId });
+    const result = await meshtasticService.sendText(text, 'broadcast', channelIndex, true, packetId);
     logger.debug('useMeshtastic', 'sendChannelMessage result:', result ? { id: result.id, packetId: result.packetId } : 'null');
     return result;
   }, []);
@@ -235,9 +235,10 @@ export function useMeshtastic(
     latitude: number,
     longitude: number,
     destination: number | 'broadcast',
-    channelIndex: number = 0
+    channelIndex: number = 0,
+    packetId?: number
   ): Promise<Message | null> => {
-    return meshtasticService.sendLocationMessage(latitude, longitude, destination, channelIndex);
+    return meshtasticService.sendLocationMessage(latitude, longitude, destination, channelIndex, packetId);
   }, []);
 
   const addChannelFromQR = useCallback(async (

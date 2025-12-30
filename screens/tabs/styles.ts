@@ -339,6 +339,12 @@ export const chatStyles = StyleSheet.create({
     color: '#FF6B6B',
     fontWeight: '700',
   },
+  statusPending: {
+    color: 'rgba(255,255,255,0.4)',
+  },
+  statusDelivered: {
+    color: '#4CD964',
+  },
 
   // Input
   inputContainer: {

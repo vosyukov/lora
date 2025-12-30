@@ -245,10 +245,11 @@ export interface ChatTabProps extends TabCommonProps {
   messages: Message[];
   openChat: ChatTarget | null;
   setOpenChat: (chat: ChatTarget | null) => void;
-  sendMessage: (to: number, text: string) => Promise<Message | null>;
-  sendChannelMessage: (text: string, channelIndex: number) => Promise<Message | null>;
-  sendLocationMessage: (latitude: number, longitude: number, destination: number | 'broadcast', channelIndex?: number) => Promise<Message | null>;
+  sendMessage: (to: number, text: string, packetId?: number) => Promise<Message | null>;
+  sendChannelMessage: (text: string, channelIndex: number, packetId?: number) => Promise<Message | null>;
+  sendLocationMessage: (latitude: number, longitude: number, destination: number | 'broadcast', channelIndex?: number, packetId?: number) => Promise<Message | null>;
   addMessage: (message: Message) => void;
+  updateMessageStatus: (packetId: number, status: MessageStatus) => void;
   addFriend: (nodeNum: number) => Promise<void>;
   removeFriend: (nodeNum: number) => Promise<void>;
   markChatAsRead: (chatKey: string) => void;

@@ -35,7 +35,7 @@ export interface UseStorageResult {
   // Messages
   messages: Message[];
   addMessage: (message: Message) => void;
-  updateMessageStatus: (packetId: number, success: boolean) => void;
+  updateMessageStatus: (packetId: number, status: Message['status']) => void;
 
   // Last read timestamps
   lastReadTimestamps: Record<string, number>;
@@ -193,20 +193,18 @@ export function useStorage(): UseStorageResult {
     }
   }, []);
 
-  const updateMessageStatus = useCallback((packetId: number, success: boolean) => {
-    const status = success ? 'delivered' : 'failed';
-
+  const updateMessageStatus = useCallback((packetId: number, status: Message['status']) => {
     // Optimistic update for UI
     setMessages(prev =>
       prev.map(m =>
         m.packetId === packetId
-          ? { ...m, status: status as Message['status'] }
+          ? { ...m, status }
           : m
       )
     );
 
     // Persist to SQLite
-    if (dbInitialized.current) {
+    if (dbInitialized.current && status) {
       databaseService.updateMessageStatus(packetId, status).catch(error => {
         console.error('Failed to update message status in SQLite:', error);
       });

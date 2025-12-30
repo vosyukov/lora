@@ -16,6 +16,9 @@ import {
 import type { NodeInfo, Message, Channel, ChatTarget } from '../../types';
 import { ChannelRole } from '../../types';
 import { BROADCAST_ADDR } from '../../constants/meshtastic';
+
+// Helper to generate packet ID
+const generatePacketId = () => Math.floor(Math.random() * 0xFFFFFFFF);
 import { sharedStyles, chatStyles } from './styles';
 import type { ChatTabProps } from './types';
 import { MessageBubble, ChatListItem } from '../../components/chat';
@@ -34,6 +37,7 @@ export default function ChatTab({
   sendChannelMessage,
   sendLocationMessage,
   addMessage,
+  updateMessageStatus,
   addFriend,
   removeFriend,
   markChatAsRead,
@@ -212,66 +216,129 @@ export default function ChatTab({
       messageLength: messageText.length,
     });
 
-    if (!openChat || !messageText.trim()) {
-      logger.debug('ChatTab', 'handleSendMessage ABORT: no openChat or empty text');
+    if (!openChat || !messageText.trim() || !myNodeNum) {
+      logger.debug('ChatTab', 'handleSendMessage ABORT: no openChat, empty text or no myNodeNum');
       return;
     }
 
+    const text = messageText.trim();
+    const packetId = generatePacketId();
+    const isChannel = openChat.type === 'channel';
+    const to = isChannel ? BROADCAST_ADDR : openChat.id;
+    const channel = isChannel ? openChat.id : 0;
+
+    // 1. Create message with 'pending' status and save to DB first
+    const pendingMessage: Message = {
+      id: `${myNodeNum}-${Date.now()}`,
+      packetId,
+      from: myNodeNum,
+      to,
+      text,
+      timestamp: Date.now(),
+      isOutgoing: true,
+      channel,
+      status: 'pending',
+    };
+
+    logger.debug('ChatTab', 'handleSendMessage: saving pending message to DB:', {
+      id: pendingMessage.id,
+      packetId: pendingMessage.packetId,
+    });
+
+    addMessage(pendingMessage);
+    setMessageText('');
+    setTimeout(() => {
+      scrollViewRef.current?.scrollToEnd({ animated: true });
+    }, 100);
+
+    // 2. Try to send via radio/MQTT
     let sentMessage: Message | null;
 
-    if (openChat.type === 'dm') {
-      logger.debug('ChatTab', 'handleSendMessage: sending DM to', openChat.id);
-      sentMessage = await sendMessage(openChat.id, messageText);
-    } else {
+    if (isChannel) {
       logger.debug('ChatTab', 'handleSendMessage: sending channel message to channel', openChat.id);
-      sentMessage = await sendChannelMessage(messageText, openChat.id);
+      sentMessage = await sendChannelMessage(text, openChat.id, packetId);
+    } else {
+      logger.debug('ChatTab', 'handleSendMessage: sending DM to', openChat.id);
+      sentMessage = await sendMessage(openChat.id, text, packetId);
     }
 
     logger.debug('ChatTab', 'handleSendMessage result:', sentMessage ? { id: sentMessage.id, packetId: sentMessage.packetId } : 'null');
 
+    // 3. Update status based on send result
     if (sentMessage) {
-      addMessage(sentMessage);
-      setMessageText('');
-      setTimeout(() => {
-        scrollViewRef.current?.scrollToEnd({ animated: true });
-      }, 100);
+      // Successfully sent to radio, update to 'sent' (waiting for ACK)
+      updateMessageStatus(packetId, 'sent');
+      // Note: status will be updated to 'delivered' when ACK is received
     } else {
-      logger.debug('ChatTab', 'handleSendMessage FAILED: showing error alert');
-      Alert.alert('Error', 'Failed to send message');
+      // Failed to send
+      logger.debug('ChatTab', 'handleSendMessage FAILED: updating status to failed');
+      updateMessageStatus(packetId, 'failed');
     }
   };
 
   const handleSendLocation = async () => {
-    if (!openChat) return;
+    if (!openChat || !myNodeNum) return;
 
     if (!currentLocation) {
       Alert.alert('Error', 'GPS not available. Enable location in settings.');
       return;
     }
 
+    const packetId = generatePacketId();
+    const isChannel = openChat.type === 'channel';
+    const to = isChannel ? BROADCAST_ADDR : openChat.id;
+    const channel = isChannel ? openChat.id : 0;
+
+    // 1. Create location message with 'pending' status and save to DB first
+    const pendingMessage: Message = {
+      id: `${myNodeNum}-${Date.now()}`,
+      packetId,
+      from: myNodeNum,
+      to,
+      text: '📍 Геолокация',
+      timestamp: Date.now(),
+      isOutgoing: true,
+      channel,
+      status: 'pending',
+      type: 'location',
+      location: {
+        latitude: currentLocation.latitude,
+        longitude: currentLocation.longitude,
+        time: Math.floor(Date.now() / 1000),
+      },
+    };
+
+    addMessage(pendingMessage);
+    setTimeout(() => {
+      scrollViewRef.current?.scrollToEnd({ animated: true });
+    }, 100);
+
+    // 2. Try to send via radio/MQTT
     let sentMessage: Message | null;
 
-    if (openChat.type === 'dm') {
-      sentMessage = await sendLocationMessage(
-        currentLocation.latitude,
-        currentLocation.longitude,
-        openChat.id
-      );
-    } else {
+    if (isChannel) {
       sentMessage = await sendLocationMessage(
         currentLocation.latitude,
         currentLocation.longitude,
         'broadcast',
-        openChat.id
+        openChat.id,
+        packetId
+      );
+    } else {
+      sentMessage = await sendLocationMessage(
+        currentLocation.latitude,
+        currentLocation.longitude,
+        openChat.id,
+        0,
+        packetId
       );
     }
 
+    // 3. Update status based on send result
     if (sentMessage) {
-      addMessage(sentMessage);
-      setTimeout(() => {
-        scrollViewRef.current?.scrollToEnd({ animated: true });
-      }, 100);
+      updateMessageStatus(packetId, 'sent');
     } else {
+      updateMessageStatus(packetId, 'failed');
       Alert.alert('Error', 'Failed to send location');
     }
   };

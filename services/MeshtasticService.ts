@@ -444,13 +444,15 @@ class MeshtasticService {
     text: string,
     destination: number | 'broadcast' = 'broadcast',
     channel: number = 0,
-    wantAck: boolean = true
+    wantAck: boolean = true,
+    existingPacketId?: number
   ): Promise<Message | null> {
     logger.debug('MeshtasticService', 'sendText called:', {
       text: text.substring(0, 50),
       destination,
       channel,
       wantAck,
+      existingPacketId,
       hasDevice: !!this.device,
       myNodeNum: this._myNodeNum,
     });
@@ -482,7 +484,7 @@ class MeshtasticService {
         payload: new TextEncoder().encode(text),
       });
 
-      const packetId = Math.floor(Math.random() * 0xFFFFFFFF);
+      const packetId = existingPacketId ?? Math.floor(Math.random() * 0xFFFFFFFF);
       logger.debug('MeshtasticService', 'sendText creating MeshPacket:', {
         packetId,
         to,
@@ -640,7 +642,7 @@ class MeshtasticService {
     longitude: number,
     destination: number | 'broadcast' = 'broadcast',
     channel: number = 0,
-    altitude?: number
+    existingPacketId?: number
   ): Promise<Message | null> {
     if (!this.device || !this._myNodeNum) {
       return null;
@@ -656,7 +658,7 @@ class MeshtasticService {
       const position = create(Mesh.PositionSchema, {
         latitudeI: Math.round(latitude * 1e7),
         longitudeI: Math.round(longitude * 1e7),
-        altitude: altitude ? Math.round(altitude) : 0,
+        altitude: 0,
         time: Math.floor(Date.now() / 1000),
       });
 
@@ -668,7 +670,7 @@ class MeshtasticService {
         payload: positionPayload,
       });
 
-      const packetId = Math.floor(Math.random() * 0xFFFFFFFF);
+      const packetId = existingPacketId ?? Math.floor(Math.random() * 0xFFFFFFFF);
       const meshPacket = create(Mesh.MeshPacketSchema, {
         to,
         from: this._myNodeNum,
@@ -711,7 +713,6 @@ class MeshtasticService {
         location: {
           latitude,
           longitude,
-          altitude,
           time: Math.floor(Date.now() / 1000),
         },
       };
