@@ -6,17 +6,14 @@ import {
   TouchableOpacity,
   Platform,
   Alert,
-  TextInput,
-  Modal,
-  Share,
   ActivityIndicator,
   StatusBar,
 } from 'react-native';
 import { Device, BleManager } from 'react-native-ble-plx';
-import QRCode from 'react-native-qrcode-svg';
 import MapLibreGL from '@maplibre/maplibre-react-native';
 
 import { meshtasticService } from '../services/MeshtasticService';
+import { logger } from '../services/LoggerService';
 import type { ActiveTab, Channel, ChatTarget } from '../types';
 import { DeviceStatusEnum, ChannelRole } from '../types';
 
@@ -25,9 +22,17 @@ import { useGps } from '../hooks/useGps';
 import { useStorage } from '../hooks/useStorage';
 import { useMeshtastic } from '../hooks/useMeshtastic';
 import { useOfflineMap } from '../hooks/useOfflineMap';
+import { useMqttProxy } from '../hooks/useMqttProxy';
+import { useModalController } from '../hooks/useModalController';
 
 // Components
 import QRScannerModal from '../components/QRScannerModal';
+import {
+  CreateGroupModal,
+  ShareChannelModal,
+  NameSetupModal,
+  EncryptionType,
+} from '../components/modals';
 
 // Tab components
 import { ChatTab, MapTab, NodeTab, SettingsTab, COLORS } from './tabs';
@@ -50,6 +55,11 @@ export default function DeviceDetailScreen({
   onOpenScanner,
   isOffline = false,
 }: DeviceDetailScreenProps) {
+  // Set BLE manager for reconnection support
+  useEffect(() => {
+    meshtasticService.setBleManager(bleManager);
+  }, [bleManager]);
+
   // Storage hook
   const {
     friendIds,
@@ -65,6 +75,8 @@ export default function DeviceDetailScreen({
     setUserName: saveUserName,
     userPhone,
     setUserPhone: saveUserPhone,
+    mqttSettings,
+    setMqttSettings: saveMqttSettings,
   } = useStorage();
 
   // Message handler for useMeshtastic
@@ -93,9 +105,10 @@ export default function DeviceDetailScreen({
     sendChannelMessage,
     sendLocationMessage,
     addChannelFromQR,
+    setMqttConfig,
     getNodeName,
     isMyNode,
-  } = useMeshtastic(device, handleIncomingMessage, handleAck);
+  } = useMeshtastic(device, handleIncomingMessage, handleAck, mqttSettings);
 
   // GPS hook
   const { currentLocation } = useGps(deviceStatus === DeviceStatusEnum.DeviceConfigured);
@@ -109,39 +122,48 @@ export default function DeviceDetailScreen({
     deleteOfflineRegion,
   } = useOfflineMap();
 
+  // MQTT Proxy hook - forwards messages between device and MQTT broker
+  const mqttProxy = useMqttProxy(
+    deviceStatus,
+    mqttSettings,
+    channels,
+    deviceConfig?.region
+  );
+
+  // Log MQTT proxy status changes
+  useEffect(() => {
+    if (mqttProxy.isConnected) {
+      logger.debug('DeviceDetailScreen', 'MQTT proxy connected, topics:', mqttProxy.subscribedTopics);
+    } else if (mqttProxy.error) {
+      logger.debug('DeviceDetailScreen', 'MQTT proxy error:', mqttProxy.error);
+    }
+  }, [mqttProxy.isConnected, mqttProxy.error, mqttProxy.subscribedTopics]);
+
   // Local UI state
   const [activeTab, setActiveTab] = useState<ActiveTab>('chat');
   const [openChat, setOpenChat] = useState<ChatTarget | null>(null);
-  const [showCreateGroup, setShowCreateGroup] = useState(false);
-  const [showQRScanner, setShowQRScanner] = useState(false);
-  const [newGroupName, setNewGroupName] = useState('');
-  const [newGroupEncryption, setNewGroupEncryption] = useState<'none' | 'aes128' | 'aes256'>('aes256');
-  const [showShareModal, setShowShareModal] = useState(false);
-  const [shareChannelUrl, setShareChannelUrl] = useState<string | null>(null);
-  const [showNameModal, setShowNameModal] = useState(false);
-  const [nameInput, setNameInput] = useState('');
   const [targetMapLocation, setTargetMapLocation] = useState<{ latitude: number; longitude: number; senderName?: string } | null>(null);
+
+  // Modal controller
+  const modals = useModalController();
 
   // Show name modal when device is configured and no name is set
   useEffect(() => {
     if (deviceStatus === DeviceStatusEnum.DeviceConfigured && userName === null) {
-      setShowNameModal(true);
+      modals.nameSetup.open();
     }
-  }, [deviceStatus, userName]);
+  }, [deviceStatus, userName, modals.nameSetup]);
 
-  const handleSetUserName = async () => {
-    const name = nameInput.trim();
-    if (!name) return;
-
-    const shortName = meshtasticService.generateShortName(name);
+  const handleSetUserName = async (name: string, shortName: string): Promise<boolean> => {
     const success = await meshtasticService.setOwner(name, shortName);
 
     if (success) {
       await saveUserName(name);
-      setShowNameModal(false);
-      setNameInput('');
+      modals.nameSetup.close();
+      return true;
     } else {
       Alert.alert('Error', 'Failed to set name. Try again.');
+      return false;
     }
   };
 
@@ -165,12 +187,7 @@ export default function DeviceDetailScreen({
     }
   };
 
-  const handleCreateGroup = async () => {
-    if (!newGroupName.trim()) {
-      Alert.alert('Error', 'Please enter a group name');
-      return;
-    }
-
+  const handleCreateGroup = async (name: string, encryption: EncryptionType) => {
     // Find first available channel slot (1-7, as 0 is PRIMARY)
     let availableIndex = -1;
     for (let i = 1; i <= 7; i++) {
@@ -188,9 +205,9 @@ export default function DeviceDetailScreen({
 
     // Generate PSK based on encryption selection
     let psk: Uint8Array;
-    if (newGroupEncryption === 'none') {
+    if (encryption === 'none') {
       psk = new Uint8Array();
-    } else if (newGroupEncryption === 'aes128') {
+    } else if (encryption === 'aes128') {
       psk = meshtasticService.generatePsk(16);
     } else {
       psk = meshtasticService.generatePsk(32);
@@ -198,15 +215,13 @@ export default function DeviceDetailScreen({
 
     const success = await meshtasticService.setChannel(
       availableIndex,
-      newGroupName.trim(),
+      name,
       psk,
       ChannelRole.SECONDARY
     );
 
     if (success) {
-      setShowCreateGroup(false);
-      setNewGroupName('');
-      setNewGroupEncryption('aes256');
+      modals.createGroup.close();
       setOpenChat({ type: 'channel', id: availableIndex });
     } else {
       Alert.alert('Error', 'Failed to create group');
@@ -236,23 +251,9 @@ export default function DeviceDetailScreen({
   const handleShareChannel = async (channelIndex: number) => {
     const url = await meshtasticService.getChannelUrl(channelIndex);
     if (url) {
-      setShareChannelUrl(url);
-      setShowShareModal(true);
+      modals.shareChannel.open(url);
     } else {
       Alert.alert('Error', 'Failed to generate share link');
-    }
-  };
-
-  const handleShareLink = async () => {
-    if (!shareChannelUrl) return;
-
-    try {
-      await Share.share({
-        message: shareChannelUrl,
-        title: 'Join my Meshtastic channel',
-      });
-    } catch (error) {
-      // User cancelled or error
     }
   };
 
@@ -280,6 +281,10 @@ export default function DeviceDetailScreen({
         return 'Reconnecting...';
       case DeviceStatusEnum.DeviceConnecting:
         return 'Connecting...';
+      case DeviceStatusEnum.DeviceInitializing:
+        return 'Initializing...';
+      case DeviceStatusEnum.DeviceConfiguring:
+        return 'Loading config...';
       default:
         return 'Disconnected';
     }
@@ -289,6 +294,8 @@ export default function DeviceDetailScreen({
     if (isOffline || !device) return COLORS.warning;
     if (deviceStatus === DeviceStatusEnum.DeviceConfigured) return COLORS.success;
     if (deviceStatus === DeviceStatusEnum.DeviceReconnecting) return COLORS.warning;
+    if (deviceStatus === DeviceStatusEnum.DeviceInitializing) return COLORS.primary;
+    if (deviceStatus === DeviceStatusEnum.DeviceConfiguring) return COLORS.primary;
     return COLORS.error;
   };
 
@@ -313,6 +320,11 @@ export default function DeviceDetailScreen({
             <View style={styles.topStatusRow}>
               <ActivityIndicator size="small" color={COLORS.warning} style={styles.topStatusSpinner} />
               <Text style={[styles.topStatusText, { color: COLORS.warning }]}>Reconnecting...</Text>
+            </View>
+          ) : deviceStatus === DeviceStatusEnum.DeviceInitializing || deviceStatus === DeviceStatusEnum.DeviceConfiguring ? (
+            <View style={styles.topStatusRow}>
+              <ActivityIndicator size="small" color={COLORS.primary} style={styles.topStatusSpinner} />
+              <Text style={[styles.topStatusText, { color: COLORS.primary }]}>{getStatusText()}</Text>
             </View>
           ) : (
             <View style={styles.topStatusRow}>
@@ -371,8 +383,8 @@ export default function DeviceDetailScreen({
           markChatAsRead={markChatAsRead}
           getUnreadCount={getUnreadCount}
           currentLocation={currentLocation}
-          onShowQRScanner={() => setShowQRScanner(true)}
-          onShowCreateGroup={() => setShowCreateGroup(true)}
+          onShowQRScanner={modals.qrScanner.open}
+          onShowCreateGroup={modals.createGroup.open}
           onShareChannel={handleShareChannel}
           onDeleteChannel={handleDeleteChannel}
           onNavigateToLocation={navigateToLocation}
@@ -418,6 +430,9 @@ export default function DeviceDetailScreen({
           userPhone={userPhone}
           saveUserName={saveUserName}
           saveUserPhone={saveUserPhone}
+          mqttSettings={mqttSettings}
+          saveMqttSettings={saveMqttSettings}
+          isConnected={deviceStatus === DeviceStatusEnum.DeviceConfigured}
         />
       )}
 
@@ -425,209 +440,56 @@ export default function DeviceDetailScreen({
       {!openChat && (
         <View style={styles.tabBar}>
           <TouchableOpacity style={styles.tabItem} onPress={() => setActiveTab('chat')}>
-            <Text style={styles.tabIcon}>{activeTab === 'chat' ? '' : ''}</Text>
+            <Text style={styles.tabIcon}>{activeTab === 'chat' ? '💬' : '💬'}</Text>
             <Text style={[styles.tabLabel, activeTab === 'chat' && styles.tabLabelActive]}>
-              Chat
+              Чаты
             </Text>
           </TouchableOpacity>
           <TouchableOpacity style={styles.tabItem} onPress={() => setActiveTab('map')}>
-            <Text style={styles.tabIcon}>{activeTab === 'map' ? '' : ''}</Text>
+            <Text style={styles.tabIcon}>{activeTab === 'map' ? '🗺️' : '🗺️'}</Text>
             <Text style={[styles.tabLabel, activeTab === 'map' && styles.tabLabelActive]}>
-              Map
+              Карта
             </Text>
           </TouchableOpacity>
           <TouchableOpacity style={styles.tabItem} onPress={() => setActiveTab('node')}>
-            <Text style={styles.tabIcon}>{activeTab === 'node' ? '' : ''}</Text>
+            <Text style={styles.tabIcon}>{activeTab === 'node' ? '📡' : '📡'}</Text>
             <Text style={[styles.tabLabel, activeTab === 'node' && styles.tabLabelActive]}>
-              Radio
+              Рация
             </Text>
           </TouchableOpacity>
           <TouchableOpacity style={styles.tabItem} onPress={() => setActiveTab('settings')}>
-            <Text style={styles.tabIcon}>{activeTab === 'settings' ? '' : ''}</Text>
+            <Text style={styles.tabIcon}>{activeTab === 'settings' ? '⚙️' : '⚙️'}</Text>
             <Text style={[styles.tabLabel, activeTab === 'settings' && styles.tabLabelActive]}>
-              Settings
+              Ещё
             </Text>
           </TouchableOpacity>
         </View>
       )}
 
       {/* Create Group Modal */}
-      <Modal
-        visible={showCreateGroup}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => setShowCreateGroup(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Create Group</Text>
-              <TouchableOpacity
-                onPress={() => setShowCreateGroup(false)}
-                style={styles.modalCloseButton}
-              >
-                <Text style={styles.modalCloseText}>Cancel</Text>
-              </TouchableOpacity>
-            </View>
-
-            <Text style={styles.modalLabel}>Group Name</Text>
-            <TextInput
-              style={styles.modalInput}
-              placeholder="Enter group name..."
-              placeholderTextColor="#8E8E93"
-              value={newGroupName}
-              onChangeText={setNewGroupName}
-              maxLength={30}
-              autoFocus
-            />
-
-            <Text style={styles.modalLabel}>Encryption</Text>
-            <View style={styles.encryptionOptions}>
-              <TouchableOpacity
-                style={[
-                  styles.encryptionOption,
-                  newGroupEncryption === 'aes256' && styles.encryptionOptionSelected,
-                ]}
-                onPress={() => setNewGroupEncryption('aes256')}
-              >
-                <Text style={[
-                  styles.encryptionOptionText,
-                  newGroupEncryption === 'aes256' && styles.encryptionOptionTextSelected,
-                ]}>
-                  AES-256
-                </Text>
-                <Text style={styles.encryptionOptionHint}>Recommended</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.encryptionOption,
-                  newGroupEncryption === 'aes128' && styles.encryptionOptionSelected,
-                ]}
-                onPress={() => setNewGroupEncryption('aes128')}
-              >
-                <Text style={[
-                  styles.encryptionOptionText,
-                  newGroupEncryption === 'aes128' && styles.encryptionOptionTextSelected,
-                ]}>
-                  AES-128
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.encryptionOption,
-                  newGroupEncryption === 'none' && styles.encryptionOptionSelected,
-                ]}
-                onPress={() => setNewGroupEncryption('none')}
-              >
-                <Text style={[
-                  styles.encryptionOptionText,
-                  newGroupEncryption === 'none' && styles.encryptionOptionTextSelected,
-                ]}>
-                  None
-                </Text>
-              </TouchableOpacity>
-            </View>
-
-            <TouchableOpacity
-              style={[
-                styles.createButton,
-                !newGroupName.trim() && styles.createButtonDisabled,
-              ]}
-              onPress={handleCreateGroup}
-              disabled={!newGroupName.trim()}
-            >
-              <Text style={styles.createButtonText}>Create Group</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
+      <CreateGroupModal
+        visible={modals.createGroup.visible}
+        onClose={modals.createGroup.close}
+        onCreate={handleCreateGroup}
+      />
 
       {/* Share Channel Modal */}
-      <Modal
-        visible={showShareModal}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => setShowShareModal(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Share Group</Text>
-              <TouchableOpacity
-                onPress={() => setShowShareModal(false)}
-                style={styles.modalCloseButton}
-              >
-                <Text style={styles.modalCloseText}>Done</Text>
-              </TouchableOpacity>
-            </View>
-
-            <View style={styles.qrContainer}>
-              {shareChannelUrl && (
-                <QRCode
-                  value={shareChannelUrl}
-                  size={200}
-                  backgroundColor="white"
-                  color="black"
-                />
-              )}
-            </View>
-
-            <Text style={styles.shareHint}>
-              Scan this QR code with another Meshtastic device to join this channel
-            </Text>
-
-            <TouchableOpacity
-              style={styles.shareUrlButton}
-              onPress={handleShareLink}
-            >
-              <Text style={styles.shareUrlButtonText}>Share Link</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
+      <ShareChannelModal
+        visible={modals.shareChannel.visible}
+        channelUrl={modals.shareChannel.data}
+        onClose={modals.shareChannel.close}
+      />
 
       {/* Name Setup Modal */}
-      <Modal
-        visible={showNameModal}
-        animationType="fade"
-        transparent
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>What's your name?</Text>
-            <Text style={styles.modalSubtitle}>
-              Your friends in the network will see this name
-            </Text>
-            <TextInput
-              style={styles.nameInput}
-              placeholder="Enter your name"
-              placeholderTextColor="#8E8E93"
-              value={nameInput}
-              onChangeText={setNameInput}
-              autoFocus
-              returnKeyType="done"
-              onSubmitEditing={handleSetUserName}
-            />
-            {nameInput.trim() && (
-              <Text style={styles.shortNamePreview}>
-                Short name: {meshtasticService.generateShortName(nameInput)}
-              </Text>
-            )}
-            <TouchableOpacity
-              style={[styles.modalButton, !nameInput.trim() && styles.modalButtonDisabled]}
-              onPress={handleSetUserName}
-              disabled={!nameInput.trim()}
-            >
-              <Text style={styles.modalButtonText}>Save</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
+      <NameSetupModal
+        visible={modals.nameSetup.visible}
+        onSave={handleSetUserName}
+      />
 
       {/* QR Scanner Modal */}
       <QRScannerModal
-        visible={showQRScanner}
-        onClose={() => setShowQRScanner(false)}
+        visible={modals.qrScanner.visible}
+        onClose={modals.qrScanner.close}
         onChannelScanned={handleQRChannelScanned}
       />
     </View>
@@ -754,160 +616,5 @@ const styles = StyleSheet.create({
   tabLabelActive: {
     color: COLORS.primary,
     fontWeight: '600',
-  },
-  // Modals
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'flex-end',
-  },
-  modalContent: {
-    backgroundColor: COLORS.white,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 20,
-    paddingBottom: Platform.OS === 'ios' ? 40 : 20,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  modalTitle: {
-    fontSize: 20,
-    fontWeight: '600',
-    color: COLORS.text,
-    marginBottom: 8,
-  },
-  modalSubtitle: {
-    fontSize: 15,
-    color: COLORS.textSecondary,
-    textAlign: 'center',
-    marginBottom: 20,
-  },
-  nameInput: {
-    backgroundColor: '#F4F4F5',
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    fontSize: 17,
-    color: COLORS.text,
-    width: '100%',
-    marginBottom: 12,
-  },
-  shortNamePreview: {
-    fontSize: 14,
-    color: COLORS.textSecondary,
-    marginBottom: 20,
-  },
-  modalButton: {
-    backgroundColor: COLORS.primary,
-    borderRadius: 12,
-    paddingVertical: 14,
-    paddingHorizontal: 24,
-    width: '100%',
-    alignItems: 'center',
-  },
-  modalButtonDisabled: {
-    backgroundColor: '#C7C7CC',
-  },
-  modalButtonText: {
-    fontSize: 17,
-    fontWeight: '600',
-    color: COLORS.white,
-  },
-  modalCloseButton: {
-    padding: 8,
-  },
-  modalCloseText: {
-    fontSize: 16,
-    color: COLORS.primary,
-  },
-  modalLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.textSecondary,
-    marginBottom: 8,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  modalInput: {
-    backgroundColor: '#F4F4F5',
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    fontSize: 16,
-    color: COLORS.text,
-    marginBottom: 20,
-  },
-  encryptionOptions: {
-    flexDirection: 'row',
-    marginBottom: 24,
-    gap: 8,
-  },
-  encryptionOption: {
-    flex: 1,
-    padding: 12,
-    borderRadius: 12,
-    backgroundColor: '#F4F4F5',
-    alignItems: 'center',
-  },
-  encryptionOptionSelected: {
-    backgroundColor: COLORS.primary,
-  },
-  encryptionOptionText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.text,
-  },
-  encryptionOptionTextSelected: {
-    color: COLORS.white,
-  },
-  encryptionOptionHint: {
-    fontSize: 11,
-    color: COLORS.textSecondary,
-    marginTop: 2,
-  },
-  createButton: {
-    backgroundColor: COLORS.primary,
-    borderRadius: 12,
-    paddingVertical: 16,
-    alignItems: 'center',
-  },
-  createButtonDisabled: {
-    backgroundColor: COLORS.border,
-  },
-  createButtonText: {
-    fontSize: 17,
-    fontWeight: '600',
-    color: COLORS.white,
-  },
-  // QR Share Modal
-  qrContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: COLORS.white,
-    padding: 24,
-    borderRadius: 16,
-    marginBottom: 20,
-  },
-  shareHint: {
-    fontSize: 14,
-    color: COLORS.textSecondary,
-    textAlign: 'center',
-    marginBottom: 20,
-    lineHeight: 20,
-  },
-  shareUrlButton: {
-    backgroundColor: '#5856D6',
-    borderRadius: 12,
-    paddingVertical: 16,
-    alignItems: 'center',
-  },
-  shareUrlButtonText: {
-    fontSize: 17,
-    fontWeight: '600',
-    color: COLORS.white,
   },
 });

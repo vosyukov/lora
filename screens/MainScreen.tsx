@@ -13,6 +13,7 @@ import DeviceDetailScreen from './DeviceDetailScreen';
 import ScannerModal from '../components/ScannerModal';
 import { MESHTASTIC_SERVICE_UUID, LAST_DEVICE_KEY, COLORS } from '../constants/meshtastic';
 import { requestBlePermissions } from '../utils/ble';
+import { logger } from '../services/LoggerService';
 
 const bleManager = new BleManager();
 
@@ -56,7 +57,7 @@ export default function MainScreen() {
 
   // Auto-connect when bluetooth is ready and we have a saved device
   useEffect(() => {
-    console.log('[MainScreen] Auto-connect effect:', {
+    logger.debug('MainScreen', 'Auto-connect effect:', {
       connectionState,
       savedDeviceLoaded,
       bluetoothState,
@@ -64,51 +65,51 @@ export default function MainScreen() {
     });
 
     if (connectionState !== 'loading') {
-      console.log('[MainScreen] Skipping - not in loading state');
+      logger.debug('MainScreen', 'Skipping - not in loading state');
       return;
     }
     if (!savedDeviceLoaded) {
-      console.log('[MainScreen] Skipping - savedDevice not loaded yet');
+      logger.debug('MainScreen', 'Skipping - savedDevice not loaded yet');
       return;
     }
 
     if (bluetoothState !== State.PoweredOn) {
       if (bluetoothState === State.PoweredOff || bluetoothState === State.Unauthorized) {
-        console.log('[MainScreen] Bluetooth off/unauthorized, going offline');
+        logger.debug('MainScreen', 'Bluetooth off/unauthorized, going offline');
         // No bluetooth - go to offline mode without prompt
         setConnectionState('offline');
       } else {
-        console.log('[MainScreen] Waiting for bluetooth, state:', bluetoothState);
+        logger.debug('MainScreen', 'Waiting for bluetooth, state:', bluetoothState);
       }
       return;
     }
 
     // Bluetooth is on, check if we have a saved device
     if (savedDevice) {
-      console.log('[MainScreen] Bluetooth on, have saved device, auto-connecting...');
+      logger.debug('MainScreen', 'Bluetooth on, have saved device, auto-connecting...');
       autoConnectToSavedDevice();
     } else {
-      console.log('[MainScreen] Bluetooth on but no saved device, going offline');
+      logger.debug('MainScreen', 'Bluetooth on but no saved device, going offline');
       // No saved device - go to offline mode
       setConnectionState('offline');
     }
   }, [bluetoothState, savedDevice, savedDeviceLoaded, connectionState]);
 
   const loadSavedDevice = async () => {
-    console.log('[MainScreen] loadSavedDevice starting...');
+    logger.debug('MainScreen', 'loadSavedDevice starting...');
     try {
       const stored = await AsyncStorage.getItem(LAST_DEVICE_KEY);
-      console.log('[MainScreen] Stored device data:', stored);
+      logger.debug('MainScreen', 'Stored device data:', stored);
       if (stored) {
         const parsed = JSON.parse(stored);
-        console.log('[MainScreen] Parsed saved device:', parsed);
+        logger.debug('MainScreen', 'Parsed saved device:', parsed);
         setSavedDevice(parsed);
       } else {
-        console.log('[MainScreen] No saved device in storage');
+        logger.debug('MainScreen', 'No saved device in storage');
         setSavedDevice(null);
       }
     } catch (err) {
-      console.log('[MainScreen] Error loading saved device:', err);
+      logger.debug('MainScreen', 'Error loading saved device:', err);
       setSavedDevice(null);
     }
     setSavedDeviceLoaded(true);
@@ -135,11 +136,11 @@ export default function MainScreen() {
 
   const autoConnectToSavedDevice = () => {
     if (!savedDevice) {
-      console.log('[MainScreen] autoConnectToSavedDevice: no saved device');
+      logger.debug('MainScreen', 'autoConnectToSavedDevice: no saved device');
       return;
     }
 
-    console.log('[MainScreen] autoConnectToSavedDevice starting, looking for:', savedDevice.id);
+    logger.debug('MainScreen', 'autoConnectToSavedDevice starting, looking for:', savedDevice.id);
     setConnectionState('auto_connecting');
     let deviceFound = false;
 
@@ -148,18 +149,23 @@ export default function MainScreen() {
       { allowDuplicates: false },
       async (error, device) => {
         if (error) {
-          console.log('[MainScreen] Scan error:', error);
+          logger.debug('MainScreen', 'Scan error:', error);
           bleManager.stopDeviceScan();
           setConnectionState('offline');
           return;
         }
 
         if (device) {
-          console.log('[MainScreen] Found device:', device.id, device.name, 'looking for:', savedDevice.id);
+          logger.debug('MainScreen', 'Found device:', device.id, device.name, 'looking for:', savedDevice.id);
         }
 
         if (device && device.id === savedDevice.id) {
-          console.log('[MainScreen] Found target device!');
+          logger.debug('MainScreen', 'Found target device!', {
+            id: device.id,
+            name: device.name,
+            rssi: device.rssi,
+            mtu: device.mtu,
+          });
           deviceFound = true;
           bleManager.stopDeviceScan();
           if (scanTimeoutRef.current) {
@@ -167,13 +173,19 @@ export default function MainScreen() {
           }
 
           try {
-            console.log('[MainScreen] Connecting to device...');
-            await device.connect();
-            console.log('[MainScreen] Connected successfully!');
-            setConnectedDevice(device);
+            // Check if already connected
+            const isConnected = await device.isConnected();
+            logger.debug('MainScreen', 'Device isConnected:', isConnected);
+
+            logger.debug('MainScreen', 'Connecting to device...');
+            // Use bleManager.connectToDevice instead of device.connect
+            // to avoid crash when device disconnects during connection
+            const connectedDevice = await bleManager.connectToDevice(device.id);
+            logger.debug('MainScreen', 'Connected successfully!');
+            setConnectedDevice(connectedDevice);
             setConnectionState('connected');
           } catch (err) {
-            console.log('[MainScreen] Connection failed:', err);
+            logger.debug('MainScreen', 'Connection failed:', err);
             setConnectionState('offline');
           }
         }
@@ -183,7 +195,7 @@ export default function MainScreen() {
     // Timeout for auto-connect scan
     scanTimeoutRef.current = setTimeout(() => {
       if (!deviceFound) {
-        console.log('[MainScreen] Scan timeout - device not found');
+        logger.debug('MainScreen', 'Scan timeout - device not found');
         bleManager.stopDeviceScan();
         setConnectionState('offline');
       }
@@ -191,7 +203,7 @@ export default function MainScreen() {
   };
 
   const handleDeviceConnected = (device: Device, deviceName: string) => {
-    console.log('[MainScreen] handleDeviceConnected:', device.id, deviceName);
+    logger.debug('MainScreen', 'handleDeviceConnected:', device.id, deviceName);
     setShowScanner(false);
     setConnectedDevice(device);
     saveDevice(device.id, deviceName);
@@ -232,14 +244,14 @@ export default function MainScreen() {
           <Text style={styles.savedDeviceName}>{savedDevice.name}</Text>
           <View style={styles.savedDeviceStatus}>
             <ActivityIndicator size="small" color={colors.primary} />
-            <Text style={styles.savedDeviceStatusText}>Поиск...</Text>
+            <Text style={styles.savedDeviceStatusText}>Подключение (до 30 сек)...</Text>
           </View>
         </View>
 
         <TouchableOpacity
           style={styles.skipButton}
           onPress={() => {
-            console.log('[MainScreen] Skip auto-connect, opening scanner');
+            logger.debug('MainScreen', 'USER PRESSED SKIP at:', Date.now());
             bleManager.stopDeviceScan();
             if (scanTimeoutRef.current) {
               clearTimeout(scanTimeoutRef.current);
@@ -254,6 +266,7 @@ export default function MainScreen() {
         <TouchableOpacity
           style={styles.cancelButton}
           onPress={() => {
+            logger.debug('MainScreen', 'USER PRESSED CANCEL at:', Date.now());
             bleManager.stopDeviceScan();
             if (scanTimeoutRef.current) {
               clearTimeout(scanTimeoutRef.current);

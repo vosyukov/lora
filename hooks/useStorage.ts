@@ -1,14 +1,27 @@
 import { useState, useEffect, useCallback } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { Message } from '../types';
+import type { Message, MqttSettings } from '../types';
 import {
   FRIENDS_STORAGE_KEY,
   MESSAGES_STORAGE_KEY,
   LAST_READ_STORAGE_KEY,
   USER_NAME_KEY,
   USER_PHONE_KEY,
+  MQTT_SETTINGS_KEY,
   MAX_STORED_MESSAGES,
 } from '../constants/meshtastic';
+
+// Default MQTT settings (HiveMQ Cloud)
+const DEFAULT_MQTT_SETTINGS: MqttSettings = {
+  enabled: true,
+  address: 'f40da9e7259b4a63884d57bd7cbbbf97.s1.eu.hivemq.cloud',
+  username: 'testtest',
+  password: 'Test1991',
+  encryptionEnabled: true,
+  tlsEnabled: true, // Port 8883
+  root: 'msh',
+  proxyToClientEnabled: false, // Radio connects to MQTT directly via WiFi
+};
 
 export interface UseStorageResult {
   // Friends
@@ -32,6 +45,10 @@ export interface UseStorageResult {
   setUserName: (name: string) => Promise<void>;
   userPhone: string | null;
   setUserPhone: (phone: string) => Promise<void>;
+
+  // MQTT settings
+  mqttSettings: MqttSettings;
+  setMqttSettings: (settings: MqttSettings) => Promise<void>;
 }
 
 export function useStorage(): UseStorageResult {
@@ -40,6 +57,7 @@ export function useStorage(): UseStorageResult {
   const [lastReadTimestamps, setLastReadTimestamps] = useState<Record<string, number>>({});
   const [userName, setUserNameState] = useState<string | null>(null);
   const [userPhone, setUserPhoneState] = useState<string | null>(null);
+  const [mqttSettings, setMqttSettingsState] = useState<MqttSettings>(DEFAULT_MQTT_SETTINGS);
 
   // Load all data on mount
   useEffect(() => {
@@ -48,6 +66,7 @@ export function useStorage(): UseStorageResult {
     loadLastRead();
     loadUserName();
     loadUserPhone();
+    loadMqttSettings();
   }, []);
 
   // Friends
@@ -211,6 +230,28 @@ export function useStorage(): UseStorageResult {
     }
   }, []);
 
+  // MQTT settings
+  const loadMqttSettings = async () => {
+    try {
+      const stored = await AsyncStorage.getItem(MQTT_SETTINGS_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored) as Partial<MqttSettings>;
+        setMqttSettingsState({ ...DEFAULT_MQTT_SETTINGS, ...parsed });
+      }
+    } catch {
+      // Ignore load errors
+    }
+  };
+
+  const setMqttSettings = useCallback(async (settings: MqttSettings) => {
+    try {
+      await AsyncStorage.setItem(MQTT_SETTINGS_KEY, JSON.stringify(settings));
+      setMqttSettingsState(settings);
+    } catch {
+      // Ignore save errors
+    }
+  }, []);
+
   return {
     friendIds,
     addFriend,
@@ -226,5 +267,7 @@ export function useStorage(): UseStorageResult {
     setUserName,
     userPhone,
     setUserPhone,
+    mqttSettings,
+    setMqttSettings,
   };
 }

@@ -10,6 +10,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import { logger } from '../services/LoggerService';
 
 interface ChannelData {
   name: string;
@@ -52,7 +53,7 @@ export default function QRScannerModal({
 
   const parseChannelUrl = async (url: string): Promise<ChannelData | null> => {
     try {
-      console.log('[QRScanner] Parsing URL:', url);
+      logger.debug('QRScanner', 'Parsing URL:', url);
 
       // Meshtastic channel URLs:
       // https://meshtastic.org/e/#CgMSAQ... (base64 encoded ChannelSet protobuf)
@@ -61,14 +62,14 @@ export default function QRScannerModal({
       const match = url.match(urlPattern);
 
       if (!match) {
-        console.log('[QRScanner] URL does not match Meshtastic pattern');
-        console.log('[QRScanner] Expected format: https://meshtastic.org/e/#<base64>');
+        logger.debug('QRScanner', 'URL does not match Meshtastic pattern');
+        logger.debug('QRScanner', 'Expected format: https://meshtastic.org/e/#<base64>');
         return null;
       }
 
       const base64Data = match[1];
-      console.log('[QRScanner] Base64 data length:', base64Data.length);
-      console.log('[QRScanner] Base64 data preview:', base64Data.substring(0, 50));
+      logger.debug('QRScanner', 'Base64 data length:', base64Data.length);
+      logger.debug('QRScanner', 'Base64 data preview:', base64Data.substring(0, 50));
 
       // Decode base64 (URL-safe base64)
       let base64Standard = base64Data.replace(/-/g, '+').replace(/_/g, '/');
@@ -76,32 +77,32 @@ export default function QRScannerModal({
       while (base64Standard.length % 4 !== 0) {
         base64Standard += '=';
       }
-      console.log('[QRScanner] Normalized base64 length:', base64Standard.length);
+      logger.debug('QRScanner', 'Normalized base64 length:', base64Standard.length);
 
       const binaryString = atob(base64Standard);
       const bytes = new Uint8Array(binaryString.length);
       for (let i = 0; i < binaryString.length; i++) {
         bytes[i] = binaryString.charCodeAt(i);
       }
-      console.log('[QRScanner] Decoded bytes length:', bytes.length);
+      logger.debug('QRScanner', 'Decoded bytes length:', bytes.length);
 
       // Parse ChannelSet protobuf
       const { fromBinary } = await import('@bufbuild/protobuf');
       const { AppOnly } = await import('@meshtastic/protobufs');
 
-      console.log('[QRScanner] Parsing protobuf...');
+      logger.debug('QRScanner', 'Parsing protobuf...');
       const channelSet = fromBinary(AppOnly.ChannelSetSchema, bytes);
-      console.log('[QRScanner] Parsed ChannelSet:', JSON.stringify(channelSet, null, 2));
+      logger.debug('QRScanner', 'Parsed ChannelSet:', JSON.stringify(channelSet, null, 2));
 
       if (!channelSet.settings || channelSet.settings.length === 0) {
-        console.log('[QRScanner] No channel settings in ChannelSet');
+        logger.debug('QRScanner', 'No channel settings in ChannelSet');
         return null;
       }
 
       // Get first channel settings
       const firstChannel = channelSet.settings[0];
-      console.log('[QRScanner] First channel name:', firstChannel.name);
-      console.log('[QRScanner] First channel psk length:', firstChannel.psk?.length || 0);
+      logger.debug('QRScanner', 'First channel name:', firstChannel.name);
+      logger.debug('QRScanner', 'First channel psk length:', firstChannel.psk?.length || 0);
 
       return {
         name: firstChannel.name || 'Default',
@@ -110,10 +111,10 @@ export default function QRScannerModal({
         downlinkEnabled: firstChannel.downlinkEnabled || false,
       };
     } catch (error) {
-      console.log('[QRScanner] Parse error:', error);
+      logger.debug('QRScanner', 'Parse error:', error);
       if (error instanceof Error) {
-        console.log('[QRScanner] Error message:', error.message);
-        console.log('[QRScanner] Error stack:', error.stack);
+        logger.debug('QRScanner', 'Error message:', error.message);
+        logger.debug('QRScanner', 'Error stack:', error.stack);
       }
       return null;
     }
@@ -122,14 +123,14 @@ export default function QRScannerModal({
   const handleBarCodeScanned = async ({ data }: { data: string }) => {
     if (scanned || processing) return;
 
-    console.log('[QRScanner] Scanned data:', data);
+    logger.debug('QRScanner', 'Scanned data:', data);
     setScanned(true);
     setProcessing(true);
 
     const channelData = await parseChannelUrl(data);
 
     if (channelData) {
-      console.log('[QRScanner] Successfully parsed channel:', channelData.name);
+      logger.debug('QRScanner', 'Successfully parsed channel:', channelData.name);
       onChannelScanned(channelData);
       onClose();
     } else {

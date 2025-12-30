@@ -26,6 +26,7 @@ export const LAST_READ_STORAGE_KEY = '@last_read';
 export const USER_NAME_KEY = '@user_name';
 export const USER_PHONE_KEY = '@user_phone';
 export const GPS_ENABLED_KEY = '@gps_enabled';
+export const MQTT_SETTINGS_KEY = '@mqtt_settings';
 export const MAX_STORED_MESSAGES = 500;
 
 // GPS configuration

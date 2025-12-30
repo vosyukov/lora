@@ -44,9 +44,13 @@ export default function NodeTab({
   const statusText = deviceStatus === DeviceStatusEnum.DeviceConfigured ? 'Connected' :
                      deviceStatus === DeviceStatusEnum.DeviceReconnecting ? 'Reconnecting...' :
                      deviceStatus === DeviceStatusEnum.DeviceConnecting ? 'Connecting...' :
+                     deviceStatus === DeviceStatusEnum.DeviceInitializing ? 'Initializing...' :
+                     deviceStatus === DeviceStatusEnum.DeviceConfiguring ? 'Loading config...' :
                      'Disconnected';
   const statusColor = deviceStatus === DeviceStatusEnum.DeviceConfigured ? COLORS.success :
                       deviceStatus === DeviceStatusEnum.DeviceReconnecting ? COLORS.warning :
+                      deviceStatus === DeviceStatusEnum.DeviceInitializing ? COLORS.primary :
+                      deviceStatus === DeviceStatusEnum.DeviceConfiguring ? COLORS.primary :
                       COLORS.error;
 
   return (

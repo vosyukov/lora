@@ -161,7 +161,7 @@ export default function MapTab({
   if (!hasAnyPosition) {
     return (
       <View style={sharedStyles.emptyState}>
-        <Text style={sharedStyles.emptyIcon}></Text>
+        <Text style={sharedStyles.emptyIcon}>🗺️</Text>
         <Text style={sharedStyles.emptyTitle}>No position data</Text>
         <Text style={sharedStyles.emptyText}>
           Enable GPS or wait for friends to share their coordinates
@@ -236,7 +236,7 @@ export default function MapTab({
             title={targetMapLocation.senderName || 'Location'}
           >
             <View style={mapStyles.sharedLocationMarker}>
-              <Text style={mapStyles.sharedLocationIcon}></Text>
+              <Text style={mapStyles.sharedLocationIcon}>📍</Text>
               {targetMapLocation.senderName && (
                 <View style={mapStyles.sharedLocationLabel}>
                   <Text style={mapStyles.sharedLocationName} numberOfLines={1}>
@@ -257,7 +257,7 @@ export default function MapTab({
             onPress={handleCenterOnMe}
             activeOpacity={0.7}
           >
-            <Text style={mapStyles.centerButtonIcon}></Text>
+            <Text style={mapStyles.centerButtonIcon}>📍</Text>
           </TouchableOpacity>
         )}
 
@@ -267,7 +267,7 @@ export default function MapTab({
             onPress={handleShowAllFriends}
             activeOpacity={0.7}
           >
-            <Text style={mapStyles.friendsButtonIcon}></Text>
+            <Text style={mapStyles.friendsButtonIcon}>👥</Text>
           </TouchableOpacity>
         )}
 
@@ -284,7 +284,7 @@ export default function MapTab({
             onPress={handleDownloadOffline}
             activeOpacity={0.7}
           >
-            <Text style={mapStyles.offlineButtonIcon}>{hasOfflinePack ? '' : ''}</Text>
+            <Text style={mapStyles.offlineButtonIcon}>{hasOfflinePack ? '✓' : '⬇️'}</Text>
             <Text style={mapStyles.offlineButtonText}>
               {hasOfflinePack ? 'Saved' : 'Offline'}
             </Text>

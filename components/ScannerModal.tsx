@@ -15,6 +15,7 @@ import {
 import { BleManager, Device, State } from 'react-native-ble-plx';
 import { MESHTASTIC_SERVICE_UUID, COLORS } from '../constants/meshtastic';
 import { rssiToPercent, getDeviceName, requestBlePermissions } from '../utils/ble';
+import { logger } from '../services/LoggerService';
 
 // Use shared COLORS from constants
 const colors = COLORS;
@@ -187,12 +188,43 @@ export default function ScannerModal({
   };
 
   const connectToDevice = async (device: MeshtasticDevice) => {
+    logger.debug('ScannerModal', 'connectToDevice starting:', {
+      id: device.id,
+      name: device.name,
+      rssi: device.rssi,
+    });
     setStep('connecting');
 
     try {
-      await device.device.connect();
+      // Check if already connected
+      const isConnected = await device.device.isConnected();
+      logger.debug('ScannerModal', 'Device isConnected:', isConnected);
+
+      if (!isConnected) {
+        logger.debug('ScannerModal', 'Starting connect at:', Date.now());
+        const startTime = Date.now();
+
+        // Simple connect with timeout (skip cancelConnection - causes crashes)
+        const connectPromise = device.device.connect({
+          autoConnect: false,
+          requestMTU: 512,
+        });
+
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => {
+            logger.debug('ScannerModal', 'Connect timeout after 30s');
+            reject(new Error('Connection timeout'));
+          }, 30000);
+        });
+
+        await Promise.race([connectPromise, timeoutPromise]);
+        logger.debug('ScannerModal', 'connect() resolved in', Date.now() - startTime, 'ms');
+      }
+
+      logger.debug('ScannerModal', 'Calling onDeviceConnected');
       onDeviceConnected(device.device, device.name);
-    } catch {
+    } catch (err) {
+      logger.debug('ScannerModal', 'Connection failed:', err);
       setStep('error');
       setErrorMessage('connection_failed');
     }

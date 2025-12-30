@@ -9,6 +9,8 @@ import {
   Platform,
   Alert,
   Keyboard,
+  Animated,
+  Pressable,
 } from 'react-native';
 
 import type { NodeInfo, Message, Channel, ChatTarget } from '../../types';
@@ -16,6 +18,7 @@ import { ChannelRole } from '../../types';
 import { BROADCAST_ADDR } from '../../constants/meshtastic';
 import { sharedStyles, chatStyles } from './styles';
 import type { ChatTabProps } from './types';
+import { MessageBubble, ChatListItem } from '../../components/chat';
 
 export default function ChatTab({
   myNodeNum,
@@ -43,6 +46,28 @@ export default function ChatTab({
 }: ChatTabProps) {
   const [messageText, setMessageText] = useState('');
   const scrollViewRef = useRef<ScrollView>(null);
+
+  // Animation for send button
+  const sendButtonScale = useRef(new Animated.Value(0)).current;
+  const sendButtonOpacity = useRef(new Animated.Value(0)).current;
+
+  // Animate send button when text changes
+  useEffect(() => {
+    const hasText = messageText.trim().length > 0;
+    Animated.parallel([
+      Animated.spring(sendButtonScale, {
+        toValue: hasText ? 1 : 0.8,
+        friction: 6,
+        tension: 100,
+        useNativeDriver: true,
+      }),
+      Animated.timing(sendButtonOpacity, {
+        toValue: hasText ? 1 : 0.5,
+        duration: 150,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [messageText]);
 
   // Filter friends and nearby (excluding self)
   const friends = useMemo(() =>
@@ -306,7 +331,7 @@ export default function ChatTab({
           </View>
         )}
         {unreadCount === 0 && channel.hasEncryption && (
-          <Text style={chatStyles.lockIcon}></Text>
+          <Text style={chatStyles.lockIcon}>🔒</Text>
         )}
       </TouchableOpacity>
     );
@@ -357,57 +382,28 @@ export default function ChatTab({
           MESSAGES {(chatList.length + friendsWithoutChats.length) > 0 ? `(${chatList.length + friendsWithoutChats.length})` : ''}
         </Text>
 
-        {chatList.map(chat => {
-          const node = getNodeByNum(chat.nodeNum);
-          const unreadCount = getUnreadCountForChat({ type: 'dm', id: chat.nodeNum });
-          return (
-            <TouchableOpacity
-              key={chat.nodeNum}
-              style={chatStyles.chatListItem}
-              onPress={() => openChatHandler({ type: 'dm', id: chat.nodeNum })}
-              activeOpacity={0.7}
-            >
-              <View style={[sharedStyles.nodeAvatar, sharedStyles.friendAvatar]}>
-                <Text style={sharedStyles.nodeAvatarText}>{getInitials(node)}</Text>
-              </View>
-              <View style={chatStyles.chatListInfo}>
-                <View style={chatStyles.chatListHeader}>
-                  <Text style={[chatStyles.chatListName, unreadCount > 0 && chatStyles.chatListNameUnread]}>
-                    {getNodeNameSafe(node)}
-                  </Text>
-                  <Text style={chatStyles.chatListTime}>
-                    {formatTime(chat.lastMessage.timestamp)}
-                  </Text>
-                </View>
-                <Text style={[chatStyles.chatListPreview, unreadCount > 0 && chatStyles.chatListPreviewUnread]} numberOfLines={1}>
-                  {chat.lastMessage.isOutgoing ? 'You: ' : ''}{chat.lastMessage.text}
-                </Text>
-              </View>
-              {unreadCount > 0 && (
-                <View style={sharedStyles.unreadBadge}>
-                  <Text style={sharedStyles.unreadBadgeText}>{unreadCount > 99 ? '99+' : unreadCount}</Text>
-                </View>
-              )}
-            </TouchableOpacity>
-          );
-        })}
+        {chatList.map(chat => (
+          <ChatListItem
+            key={chat.nodeNum}
+            node={getNodeByNum(chat.nodeNum)}
+            lastMessage={chat.lastMessage}
+            unreadCount={getUnreadCountForChat({ type: 'dm', id: chat.nodeNum })}
+            onPress={() => openChatHandler({ type: 'dm', id: chat.nodeNum })}
+            getNodeName={getNodeNameSafe}
+            formatTime={formatTime}
+          />
+        ))}
 
         {friendsWithoutChats.map(node => (
-          <TouchableOpacity
+          <ChatListItem
             key={node.nodeNum}
-            style={chatStyles.chatListItem}
+            node={node}
+            unreadCount={0}
             onPress={() => openChatHandler({ type: 'dm', id: node.nodeNum })}
             onLongPress={() => handleNodePress(node)}
-            activeOpacity={0.7}
-          >
-            <View style={[sharedStyles.nodeAvatar, sharedStyles.friendAvatar]}>
-              <Text style={sharedStyles.nodeAvatarText}>{getInitials(node)}</Text>
-            </View>
-            <View style={chatStyles.chatListInfo}>
-              <Text style={chatStyles.chatListName}>{getNodeName(node)}</Text>
-              <Text style={chatStyles.chatListPreview}>Tap to send message</Text>
-            </View>
-          </TouchableOpacity>
+            getNodeName={getNodeNameSafe}
+            formatTime={formatTime}
+          />
         ))}
 
         {chatList.length === 0 && friendsWithoutChats.length === 0 && (
@@ -456,7 +452,7 @@ export default function ChatTab({
         {/* Empty state */}
         {activeChannels.length === 0 && chatList.length === 0 && friends.length === 0 && nearby.length === 0 && (
           <View style={sharedStyles.emptyState}>
-            <Text style={sharedStyles.emptyIcon}></Text>
+            <Text style={sharedStyles.emptyIcon}>💬</Text>
             <Text style={sharedStyles.emptyTitle}>No one nearby</Text>
             <Text style={sharedStyles.emptyText}>
               When friends turn on their radios, they will appear here
@@ -544,98 +540,15 @@ export default function ChatTab({
               const senderNode = getNodeByNum(msg.from);
               const senderName = getNodeNameSafe(senderNode);
 
-              const getStatusIcon = () => {
-                if (!msg.isOutgoing) return null;
-                switch (msg.status) {
-                  case 'delivered':
-                    return <Text style={chatStyles.statusIcon}></Text>;
-                  case 'failed':
-                    return <Text style={[chatStyles.statusIcon, chatStyles.statusFailed]}>!</Text>;
-                  case 'sent':
-                  default:
-                    return <Text style={chatStyles.statusIcon}></Text>;
-                }
-              };
-
-              // Location messages
-              if (msg.type === 'location' && msg.location) {
-                const { latitude, longitude, altitude } = msg.location;
-                const locationSenderName = msg.isOutgoing ? 'You' : senderName;
-                return (
-                  <View key={msg.id}>
-                    {isChannel && !msg.isOutgoing && (
-                      <Text style={chatStyles.channelSenderName}>{senderName}</Text>
-                    )}
-                    <TouchableOpacity
-                      style={[
-                        chatStyles.messageBubble,
-                        chatStyles.locationBubble,
-                        msg.isOutgoing ? chatStyles.outgoingBubble : chatStyles.incomingBubble,
-                      ]}
-                      onPress={() => onNavigateToLocation(latitude, longitude, locationSenderName)}
-                      activeOpacity={0.7}
-                    >
-                      <View style={chatStyles.locationContent}>
-                        <Text style={chatStyles.locationIcon}></Text>
-                        <View style={chatStyles.locationInfo}>
-                          <Text style={[
-                            chatStyles.locationTitle,
-                            msg.isOutgoing ? chatStyles.outgoingText : chatStyles.incomingText,
-                          ]}>
-                            Location
-                          </Text>
-                          <Text style={[
-                            chatStyles.locationCoords,
-                            msg.isOutgoing ? chatStyles.outgoingCoords : chatStyles.incomingCoords,
-                          ]}>
-                            {latitude.toFixed(6)}, {longitude.toFixed(6)}
-                            {altitude ? ` @ ${altitude}m` : ''}
-                          </Text>
-                          <Text style={chatStyles.locationHint}>Show on map</Text>
-                        </View>
-                      </View>
-                      <View style={chatStyles.messageFooter}>
-                        <Text style={[
-                          chatStyles.messageTime,
-                          msg.isOutgoing ? chatStyles.outgoingTime : chatStyles.incomingTime,
-                        ]}>
-                          {formatTime(msg.timestamp)}
-                        </Text>
-                        {getStatusIcon()}
-                      </View>
-                    </TouchableOpacity>
-                  </View>
-                );
-              }
-
               return (
-                <View key={msg.id}>
-                  {isChannel && !msg.isOutgoing && (
-                    <Text style={chatStyles.channelSenderName}>{senderName}</Text>
-                  )}
-                  <View
-                    style={[
-                      chatStyles.messageBubble,
-                      msg.isOutgoing ? chatStyles.outgoingBubble : chatStyles.incomingBubble,
-                    ]}
-                  >
-                    <Text style={[
-                      chatStyles.messageText,
-                      msg.isOutgoing ? chatStyles.outgoingText : chatStyles.incomingText,
-                    ]}>
-                      {msg.text}
-                    </Text>
-                    <View style={chatStyles.messageFooter}>
-                      <Text style={[
-                        chatStyles.messageTime,
-                        msg.isOutgoing ? chatStyles.outgoingTime : chatStyles.incomingTime,
-                      ]}>
-                        {formatTime(msg.timestamp)}
-                      </Text>
-                      {getStatusIcon()}
-                    </View>
-                  </View>
-                </View>
+                <MessageBubble
+                  key={msg.id}
+                  message={msg}
+                  senderName={senderName}
+                  isChannel={isChannel}
+                  formatTime={formatTime}
+                  onLocationPress={onNavigateToLocation}
+                />
               );
             })
           )}
@@ -658,17 +571,25 @@ export default function ChatTab({
             multiline
             maxLength={200}
           />
-          <TouchableOpacity
-            style={[
-              chatStyles.sendButton,
-              !messageText.trim() && chatStyles.sendButtonDisabled,
-            ]}
+          <Pressable
             onPress={handleSendMessage}
             disabled={!messageText.trim()}
-            activeOpacity={0.7}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            style={({ pressed }) => [
+              chatStyles.sendButton,
+              !messageText.trim() && chatStyles.sendButtonDisabled,
+              pressed && messageText.trim() && { transform: [{ scale: 0.9 }] },
+            ]}
           >
-            <Text style={chatStyles.sendButtonText}></Text>
-          </TouchableOpacity>
+            <Animated.View
+              style={{
+                transform: [{ scale: sendButtonScale }],
+                opacity: sendButtonOpacity,
+              }}
+            >
+              <Text style={chatStyles.sendButtonText}>↑</Text>
+            </Animated.View>
+          </Pressable>
         </View>
       </KeyboardAvoidingView>
     );
