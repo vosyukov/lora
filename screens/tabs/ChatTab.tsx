@@ -597,7 +597,7 @@ export default function ChatTab({
             onPress={() => setOpenChat(null)}
             style={chatStyles.chatBackButton}
           >
-            <Text style={chatStyles.backButtonText}></Text>
+            <Text style={chatStyles.backButtonText}>‹</Text>
           </TouchableOpacity>
           <View style={[
             chatStyles.chatHeaderAvatar,

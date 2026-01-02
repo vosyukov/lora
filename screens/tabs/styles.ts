@@ -531,8 +531,9 @@ export const chatStyles = StyleSheet.create({
 
   // Back button
   backButtonText: {
-    fontSize: 17,
+    fontSize: 28,
     color: COLORS.primary,
+    fontWeight: '300',
   },
 });
 
