@@ -59,6 +59,7 @@ class MeshtasticService {
   readonly onMyNodeInfoExtended = new SimpleEventDispatcher<MyNodeInfoExtended>();
   readonly onMqttConfigPacket = new SimpleEventDispatcher<MqttSettings>();
   readonly onMqttClientProxyMessage = new SimpleEventDispatcher<MqttClientProxyMessage>();
+  readonly onMqttAck = new SimpleEventDispatcher<{ packetId: number; success: boolean }>();
   readonly onError = new SimpleEventDispatcher<Error>();
 
   get myNodeNum(): number | null {

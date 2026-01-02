@@ -39,6 +39,7 @@ export interface NodeInfo {
 }
 
 export type MessageStatus = 'pending' | 'sent' | 'delivered' | 'failed';
+export type MqttStatus = 'not_applicable' | 'pending' | 'sent' | 'failed';
 export type MessageType = 'text' | 'location';
 
 export interface LocationData {
@@ -57,7 +58,9 @@ export interface Message {
   timestamp: number;
   isOutgoing: boolean;
   channel?: number;
-  status?: MessageStatus;   // Only for outgoing messages
+  status?: MessageStatus;   // Legacy: overall status
+  radioStatus?: MessageStatus;  // Radio delivery status (BLE → mesh → ACK)
+  mqttStatus?: MqttStatus;      // MQTT proxy status (→ broker)
   type?: MessageType;       // Message type (text or location)
   location?: LocationData;  // Location data for location messages
 }
@@ -250,6 +253,8 @@ export interface ChatTabProps extends TabCommonProps {
   sendLocationMessage: (latitude: number, longitude: number, destination: number | 'broadcast', channelIndex?: number, packetId?: number) => Promise<Message | null>;
   addMessage: (message: Message) => void;
   updateMessageStatus: (packetId: number, status: MessageStatus) => void;
+  updateRadioStatus: (packetId: number, status: MessageStatus) => void;
+  updateMqttStatus: (packetId: number, status: MqttStatus) => void;
   addFriend: (nodeNum: number) => Promise<void>;
   removeFriend: (nodeNum: number) => Promise<void>;
   markChatAsRead: (chatKey: string) => void;

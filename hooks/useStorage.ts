@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { Message, MqttSettings } from '../types';
+import type { Message, MqttSettings, MessageStatus, MqttStatus } from '../types';
 import {
   FRIENDS_STORAGE_KEY,
   MESSAGES_STORAGE_KEY,
@@ -36,6 +36,8 @@ export interface UseStorageResult {
   messages: Message[];
   addMessage: (message: Message) => void;
   updateMessageStatus: (packetId: number, status: Message['status']) => void;
+  updateRadioStatus: (packetId: number, status: MessageStatus) => void;
+  updateMqttStatus: (packetId: number, status: MqttStatus) => void;
 
   // Last read timestamps
   lastReadTimestamps: Record<string, number>;
@@ -211,6 +213,42 @@ export function useStorage(): UseStorageResult {
     }
   }, []);
 
+  // Update radio status separately (📡)
+  const updateRadioStatus = useCallback((packetId: number, status: MessageStatus) => {
+    setMessages(prev =>
+      prev.map(m =>
+        m.packetId === packetId
+          ? { ...m, radioStatus: status, status } // Also update legacy status
+          : m
+      )
+    );
+
+    // Persist to SQLite
+    if (dbInitialized.current) {
+      databaseService.updateRadioStatus(packetId, status).catch(error => {
+        console.error('Failed to update radio status in SQLite:', error);
+      });
+    }
+  }, []);
+
+  // Update MQTT status separately (🌐)
+  const updateMqttStatus = useCallback((packetId: number, status: MqttStatus) => {
+    setMessages(prev =>
+      prev.map(m =>
+        m.packetId === packetId
+          ? { ...m, mqttStatus: status }
+          : m
+      )
+    );
+
+    // Persist to SQLite
+    if (dbInitialized.current) {
+      databaseService.updateMqttStatus(packetId, status).catch(error => {
+        console.error('Failed to update mqtt status in SQLite:', error);
+      });
+    }
+  }, []);
+
   // Last read timestamps
   const loadLastRead = async () => {
     try {
@@ -308,6 +346,8 @@ export function useStorage(): UseStorageResult {
     messages,
     addMessage,
     updateMessageStatus,
+    updateRadioStatus,
+    updateMqttStatus,
     lastReadTimestamps,
     markChatAsRead,
     getUnreadCount,

@@ -1,8 +1,8 @@
 import * as SQLite from 'expo-sqlite';
-import type { Message, MessageStatus, MessageType, LocationData } from '../types';
+import type { Message, MessageStatus, MqttStatus, MessageType, LocationData } from '../types';
 
 const DATABASE_NAME = 'meshtastic.db';
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 // Database row types
 interface MessageRow {
@@ -15,6 +15,8 @@ interface MessageRow {
   is_outgoing: number;
   channel: number | null;
   status: string | null;
+  radio_status: string | null;
+  mqtt_status: string | null;
   type: string | null;
   location_lat: number | null;
   location_lon: number | null;
@@ -67,6 +69,8 @@ class DatabaseService {
           is_outgoing INTEGER NOT NULL DEFAULT 0,
           channel INTEGER,
           status TEXT,
+          radio_status TEXT,
+          mqtt_status TEXT,
           type TEXT DEFAULT 'text',
           location_lat REAL,
           location_lon REAL,
@@ -78,6 +82,14 @@ class DatabaseService {
         CREATE INDEX IF NOT EXISTS idx_messages_from_to ON messages(from_node, to_node);
         CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel);
         CREATE INDEX IF NOT EXISTS idx_messages_packet_id ON messages(packet_id);
+      `);
+    }
+
+    // Version 1 -> 2: Add radio_status and mqtt_status columns
+    if (fromVersion >= 1 && fromVersion < 2) {
+      await this.db.execAsync(`
+        ALTER TABLE messages ADD COLUMN radio_status TEXT;
+        ALTER TABLE messages ADD COLUMN mqtt_status TEXT;
       `);
     }
 
@@ -105,9 +117,9 @@ class DatabaseService {
     await this.db.runAsync(
       `INSERT INTO messages (
         id, packet_id, from_node, to_node, text, timestamp,
-        is_outgoing, channel, status, type,
+        is_outgoing, channel, status, radio_status, mqtt_status, type,
         location_lat, location_lon, location_alt, location_time
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         message.id,
         message.packetId ?? null,
@@ -118,6 +130,8 @@ class DatabaseService {
         message.isOutgoing ? 1 : 0,
         message.channel ?? null,
         message.status ?? null,
+        message.radioStatus ?? null,
+        message.mqttStatus ?? null,
         message.type ?? 'text',
         message.location?.latitude ?? null,
         message.location?.longitude ?? null,
@@ -175,6 +189,26 @@ class DatabaseService {
     );
   }
 
+  async updateRadioStatus(packetId: number, status: MessageStatus): Promise<void> {
+    await this.init();
+    if (!this.db) throw new Error('Database not initialized');
+
+    await this.db.runAsync(
+      'UPDATE messages SET radio_status = ?, status = ? WHERE packet_id = ?',
+      [status, status, packetId]
+    );
+  }
+
+  async updateMqttStatus(packetId: number, status: MqttStatus): Promise<void> {
+    await this.init();
+    if (!this.db) throw new Error('Database not initialized');
+
+    await this.db.runAsync(
+      'UPDATE messages SET mqtt_status = ? WHERE packet_id = ?',
+      [status, packetId]
+    );
+  }
+
   async deleteOldMessages(keepCount: number): Promise<void> {
     await this.init();
     if (!this.db) throw new Error('Database not initialized');
@@ -208,9 +242,9 @@ class DatabaseService {
         await this.db!.runAsync(
           `INSERT OR IGNORE INTO messages (
             id, packet_id, from_node, to_node, text, timestamp,
-            is_outgoing, channel, status, type,
+            is_outgoing, channel, status, radio_status, mqtt_status, type,
             location_lat, location_lon, location_alt, location_time
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             message.id,
             message.packetId ?? null,
@@ -221,6 +255,8 @@ class DatabaseService {
             message.isOutgoing ? 1 : 0,
             message.channel ?? null,
             message.status ?? null,
+            message.radioStatus ?? null,
+            message.mqttStatus ?? null,
             message.type ?? 'text',
             message.location?.latitude ?? null,
             message.location?.longitude ?? null,
@@ -250,6 +286,12 @@ class DatabaseService {
     }
     if (row.status !== null) {
       message.status = row.status as MessageStatus;
+    }
+    if (row.radio_status !== null) {
+      message.radioStatus = row.radio_status as MessageStatus;
+    }
+    if (row.mqtt_status !== null) {
+      message.mqttStatus = row.mqtt_status as MqttStatus;
     }
     if (row.type !== null) {
       message.type = row.type as MessageType;

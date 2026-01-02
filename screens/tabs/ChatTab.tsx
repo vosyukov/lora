@@ -13,7 +13,7 @@ import {
   Pressable,
 } from 'react-native';
 
-import type { NodeInfo, Message, Channel, ChatTarget } from '../../types';
+import type { NodeInfo, Message, Channel, ChatTarget, MessageStatus, MqttStatus } from '../../types';
 import { ChannelRole } from '../../types';
 import { BROADCAST_ADDR } from '../../constants/meshtastic';
 
@@ -38,6 +38,8 @@ export default function ChatTab({
   sendLocationMessage,
   addMessage,
   updateMessageStatus,
+  updateRadioStatus,
+  updateMqttStatus,
   addFriend,
   removeFriend,
   markChatAsRead,
@@ -227,7 +229,11 @@ export default function ChatTab({
     const to = isChannel ? BROADCAST_ADDR : openChat.id;
     const channel = isChannel ? openChat.id : 0;
 
-    // 1. Create message with 'pending' status and save to DB first
+    // Check if MQTT uplink is enabled for this channel
+    const targetChannel = isChannel ? channels.find(ch => ch.index === openChat.id) : null;
+    const hasMqttUplink = targetChannel?.uplinkEnabled === true;
+
+    // 1. Create message with initial status and save to DB first
     const pendingMessage: Message = {
       id: `${myNodeNum}-${Date.now()}`,
       packetId,
@@ -237,7 +243,9 @@ export default function ChatTab({
       timestamp: Date.now(),
       isOutgoing: true,
       channel,
-      status: 'pending',
+      status: 'pending', // Legacy field
+      radioStatus: 'pending',
+      mqttStatus: hasMqttUplink ? 'pending' : 'not_applicable',
     };
 
     logger.debug('ChatTab', 'handleSendMessage: saving pending message to DB:', {
@@ -266,13 +274,17 @@ export default function ChatTab({
 
     // 3. Update status based on send result
     if (sentMessage) {
-      // Successfully sent to radio, update to 'sent' (waiting for ACK)
-      updateMessageStatus(packetId, 'sent');
-      // Note: status will be updated to 'delivered' when ACK is received
+      // Successfully sent to radio, update radio status to 'sent' (waiting for ACK)
+      updateRadioStatus(packetId, 'sent');
+      // Note: radioStatus will be updated to 'delivered' when radio ACK is received
+      // mqttStatus will be updated to 'sent' when MQTT publish is confirmed
     } else {
       // Failed to send
       logger.debug('ChatTab', 'handleSendMessage FAILED: updating status to failed');
-      updateMessageStatus(packetId, 'failed');
+      updateRadioStatus(packetId, 'failed');
+      if (hasMqttUplink) {
+        updateMqttStatus(packetId, 'failed');
+      }
     }
   };
 
@@ -289,7 +301,11 @@ export default function ChatTab({
     const to = isChannel ? BROADCAST_ADDR : openChat.id;
     const channel = isChannel ? openChat.id : 0;
 
-    // 1. Create location message with 'pending' status and save to DB first
+    // Check if MQTT uplink is enabled for this channel
+    const targetChannel = isChannel ? channels.find(ch => ch.index === openChat.id) : null;
+    const hasMqttUplink = targetChannel?.uplinkEnabled === true;
+
+    // 1. Create location message with initial status and save to DB first
     const pendingMessage: Message = {
       id: `${myNodeNum}-${Date.now()}`,
       packetId,
@@ -299,7 +315,9 @@ export default function ChatTab({
       timestamp: Date.now(),
       isOutgoing: true,
       channel,
-      status: 'pending',
+      status: 'pending', // Legacy field
+      radioStatus: 'pending',
+      mqttStatus: hasMqttUplink ? 'pending' : 'not_applicable',
       type: 'location',
       location: {
         latitude: currentLocation.latitude,
@@ -336,9 +354,12 @@ export default function ChatTab({
 
     // 3. Update status based on send result
     if (sentMessage) {
-      updateMessageStatus(packetId, 'sent');
+      updateRadioStatus(packetId, 'sent');
     } else {
-      updateMessageStatus(packetId, 'failed');
+      updateRadioStatus(packetId, 'failed');
+      if (hasMqttUplink) {
+        updateMqttStatus(packetId, 'failed');
+      }
       Alert.alert('Error', 'Failed to send location');
     }
   };

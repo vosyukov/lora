@@ -68,6 +68,8 @@ export default function DeviceDetailScreen({
     messages,
     addMessage,
     updateMessageStatus,
+    updateRadioStatus,
+    updateMqttStatus,
     lastReadTimestamps,
     markChatAsRead,
     getUnreadCount,
@@ -84,10 +86,22 @@ export default function DeviceDetailScreen({
     addMessage(message);
   }, [addMessage]);
 
-  // ACK handler for useMeshtastic
+  // Radio ACK handler for useMeshtastic (📡)
   const handleAck = useCallback((packetId: number, success: boolean) => {
-    updateMessageStatus(packetId, success ? 'delivered' : 'failed');
-  }, [updateMessageStatus]);
+    updateRadioStatus(packetId, success ? 'delivered' : 'failed');
+  }, [updateRadioStatus]);
+
+  // MQTT ACK handler (🌐) - subscribe to MQTT publish confirmations
+  useEffect(() => {
+    const unsubscribe = meshtasticService.onMqttAck.subscribe(({ packetId, success }) => {
+      logger.debug('DeviceDetailScreen', 'MQTT ACK received:', { packetId, success });
+      updateMqttStatus(packetId, success ? 'sent' : 'failed');
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [updateMqttStatus]);
 
   // Meshtastic hook
   const {
@@ -379,6 +393,8 @@ export default function DeviceDetailScreen({
           sendLocationMessage={sendLocationMessage}
           addMessage={addMessage}
           updateMessageStatus={updateMessageStatus}
+          updateRadioStatus={updateRadioStatus}
+          updateMqttStatus={updateMqttStatus}
           addFriend={addFriend}
           removeFriend={removeFriend}
           markChatAsRead={markChatAsRead}

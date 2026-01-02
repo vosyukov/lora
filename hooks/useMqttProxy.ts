@@ -156,11 +156,32 @@ export function useMqttProxy(
         return;
       }
 
+      // Parse ServiceEnvelope to get packetId for ACK tracking
+      let packetId: number | undefined;
+      if (message.data && message.data.length > 0) {
+        try {
+          const { Mqtt } = await import('@meshtastic/protobufs');
+          const { fromBinary } = await import('@bufbuild/protobuf');
+          const envelope = fromBinary(Mqtt.ServiceEnvelopeSchema, message.data);
+          packetId = envelope.packet?.id;
+          logger.debug('useMqttProxy', 'Parsed ServiceEnvelope, packetId:', packetId);
+        } catch (err) {
+          logger.warn('useMqttProxy', 'Failed to parse ServiceEnvelope:', err);
+        }
+      }
+
       logger.debug('useMqttProxy', 'Forwarding to MQTT:', message.topic);
       const success = await mqttProxyService.publish(message);
 
       if (success) {
         setMessagesProxied((prev) => prev + 1);
+        // Dispatch MQTT ACK if we have a packetId
+        if (packetId) {
+          meshtasticService.onMqttAck.dispatch({ packetId, success: true });
+        }
+      } else if (packetId) {
+        // Dispatch failure
+        meshtasticService.onMqttAck.dispatch({ packetId, success: false });
       }
     });
 

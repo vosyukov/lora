@@ -36,6 +36,12 @@ export default function MainScreen() {
   const [bluetoothState, setBluetoothState] = useState<State>(State.Unknown);
   const [savedDeviceLoaded, setSavedDeviceLoaded] = useState(false);
   const scanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const connectedDeviceRef = useRef<Device | null>(null);
+
+  // Keep connectedDeviceRef in sync with connectedDevice state
+  useEffect(() => {
+    connectedDeviceRef.current = connectedDevice;
+  }, [connectedDevice]);
 
   // Monitor bluetooth state
   useEffect(() => {
@@ -47,11 +53,24 @@ export default function MainScreen() {
     loadSavedDevice();
 
     return () => {
+      logger.debug('MainScreen', 'Cleanup: removing subscriptions and destroying BLE manager');
+
       subscription.remove();
       bleManager.stopDeviceScan();
+
       if (scanTimeoutRef.current) {
         clearTimeout(scanTimeoutRef.current);
       }
+
+      // Disconnect from device if connected
+      if (connectedDeviceRef.current) {
+        connectedDeviceRef.current.cancelConnection().catch(() => {
+          // Ignore errors during cleanup
+        });
+      }
+
+      // Destroy BLE manager to free resources
+      bleManager.destroy();
     };
   }, []);
 

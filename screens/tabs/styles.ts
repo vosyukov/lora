@@ -332,7 +332,7 @@ export const chatStyles = StyleSheet.create({
   statusIcon: {
     fontSize: 11,
     color: 'rgba(255,255,255,0.7)',
-    marginLeft: 4,
+    marginLeft: 2,
     fontWeight: '600',
   },
   statusFailed: {
@@ -344,6 +344,21 @@ export const chatStyles = StyleSheet.create({
   },
   statusDelivered: {
     color: '#4CD964',
+  },
+  // Dual status display (📡 + 🌐)
+  dualStatusContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginLeft: 4,
+    gap: 6,
+  },
+  statusGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  statusLabel: {
+    fontSize: 9,
+    marginRight: 1,
   },
 
   // Input
